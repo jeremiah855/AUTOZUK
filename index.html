@@ -1180,30 +1180,9 @@ const PRAYER_IMG_DATA={
   melee:'data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAeAB4DASIAAhEBAxEB/8QAGgAAAQUBAAAAAAAAAAAAAAAABQADBgcIBP/EACcQAAICAQQBAwQDAAAAAAAAAAECAwQRBQYSIQAHEzIVIjFBYXFi/8QAFwEBAQEBAAAAAAAAAAAAAAAABAUBA//EAC8RAAEDAgQDBAsAAAAAAAAAAAECAxEhMRIiMkEABAUTM1HwQlJhYnGBkaGxweH/2gAMAwEAAhEDEQA/AMZeF9s7d1HcNg1tMjeewXCRwRQSzSyMVdsKkaMxwsbE9dAeCPJ7sptW2tNFfo2rFHVorMFkTwkhqIHIAP0QzyKzqIiDkE5H687tNLWha0gZUk5pAxQcIMVqqLVubA8J5ZsKJUvSBX6UHxJ8xPArStLrVu4p6epW5UyjKPcgrIR83DAcpPyAhHWMn9eObqSj9IZqcWfamhjklNeJMS8Zi6q0aLkYEZwckE+XxvbUdu+sHpre3LX06lo3qHt1Bb12GiYxNbpqBHO6vzAZVRQw58njMYQfNWfOO6rDvq01FQsdWjI8FeFOlRQxGf5Y4ySeyfDdI6yvqDDq3EdkWzgLUzmInET6QIqlW9AIAoxa0paJTpsAN5mp/s1gClpZ6abK1TWLqHTa3v3QiTPOU5wabE3azSn4+4QCUUkAY5HAHUk3la0PRKkuh6ROTWpOyXtSzzd5W+axkgc53wMseowB0pH2i9q+rOobc2da21pVyejBdMbz2IaYNqNhDFE4il90BcrF03DI5EjBAIrvWNSfUJI1WNa9WAcK9dD9sS/6x/JY9k+XuYQGAC4Mg0p9b3lfad7JEC2PJDQGMZRpHj7T+99hAt1XNw2puEMNenDThyK9dq0coiX+3Ukk4yT+z34Lszy2bMtiZucsrl3bAGWJyT1434vJb/NPP94on8fIWEWEWFOAuvuO61E+fDj/2Q=='
 };
 
-// ===== AUDIO SYSTEM =====
-let audioCtx=null;
-function ensureAudio(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();return audioCtx}
-function playExclusionBlip(){
-  let ac=ensureAudio(),t=ac.currentTime;
-  let osc=ac.createOscillator(),gain=ac.createGain();
-  osc.connect(gain);gain.connect(ac.destination);
-  osc.type='square';osc.frequency.setValueAtTime(1800,t);osc.frequency.exponentialRampToValueAtTime(800,t+0.03);
-  gain.gain.setValueAtTime(0.04,t);gain.gain.exponentialRampToValueAtTime(0.001,t+0.04);
-  osc.start(t);osc.stop(t+0.04);
-}
-function playScoreBlip(avgDmg){
-  let ac=ensureAudio(),t=ac.currentTime;
-  let osc=ac.createOscillator(),gain=ac.createGain();
-  osc.connect(gain);gain.connect(ac.destination);
-  // Score 0 = 880Hz (high), score 100+ = 440Hz (low), linear in between
-  let clamped=Math.max(0,Math.min(100,avgDmg));
-  let freq=880-clamped*4.4; // 880 → 440
-  // Perfect tile (rounds to 0): +25% pitch boost
-  if(Math.round(avgDmg)===0)freq=880*1.25;
-  osc.type='sine';osc.frequency.setValueAtTime(freq,t);
-  gain.gain.setValueAtTime(0.08,t);gain.gain.exponentialRampToValueAtTime(0.001,t+0.08);
-  osc.start(t);osc.stop(t+0.08);
-}
+// ===== AUDIO SYSTEM (disabled) =====
+function playExclusionBlip(){}
+function playScoreBlip(avgDmg){}
 
 const canvas=document.getElementById('grid');
 const ctx=canvas.getContext('2d');
