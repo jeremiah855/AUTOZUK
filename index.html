@@ -243,6 +243,10 @@ canvas#grid{border:1px solid var(--panel-border);cursor:crosshair;image-renderin
           <label>Max Ticks / Sim</label>
           <input type="number" id="maxTicks" value="400" min="50" max="1000" style="font-size:12px;letter-spacing:0">
         </div>
+        <div class="control-group" style="margin-top:6px">
+          <label>Best Tiles to Keep (top-k)</label>
+          <input type="number" id="topK" value="8" min="1" max="50" style="font-size:12px;letter-spacing:0" title="Only the best k tiles are sampled to full depth; the rest are eliminated early with coarse estimates">
+        </div>
         <button class="btn btn-primary" style="width:100%;margin-top:6px;padding:12px;font-size:13px;letter-spacing:2px" id="btnAutozuk" onclick="startAutozuk()">START AUTOZUK</button>
         <div style="display:flex;gap:4px;margin-top:4px">
           <button class="btn btn-secondary" style="flex:1;padding:8px;font-size:10px;letter-spacing:1px" onclick="resetAutozuk()">RESET</button>
@@ -912,6 +916,17 @@ function hlRunSim(spawnCode,playerPos,pillarConfig,loadout,maxTicks,cachedRegion
   return{attacks:S.attacks,completedTick:maxTicks,mobs:S.mobs,status:hlTimeoutResultStatus(S),mobInitHP:S.mobInitHP};
 }
 
+// Kernel seam: produce ONE rollout for (tile, seedIndex). Owns the canonical per-sim
+// seed derivation so the worker, the main-thread coordinator, and any future WASM kernel
+// all agree on it. Returns a serializable rollout (drops the large unused `mobs` field);
+// the fields kept are exactly what buildSummary/optimizePrayer/calcSimDamage consume.
+function runRollout(spawnCode,tile,pillarConfig,loadout,maxTicks,region,seedBase,seedIndex){
+  let seed=(seedBase ^ (tile.x*73856093) ^ (tile.y*19349663) ^ (seedIndex*83492791)) >>> 0;
+  let r=hlRunSim(spawnCode,tile,pillarConfig,loadout,maxTicks,region,seed);
+  if(!r)return null;
+  return {attacks:r.attacks,completedTick:r.completedTick,status:r.status,mobInitHP:r.mobInitHP,cleanupReason:r.cleanupReason};
+}
+
 function checkTrappedValid(trapped){
   if(trapped.length===0)return true;
   if(trapped.length>2)return false;
@@ -1213,17 +1228,124 @@ function playerBFS(sx,sy,tx,ty,region){
   else if(dy!==0&&!bl[(nx<<6)|ny])return{x:nx,y:ny};
   return null;
 }
+
+// =====================================================
+// PHASE 2: ADAPTIVE SAMPLING HELPERS (pure, DOM-free, headlessly testable)
+// Two-phase strategy (see startAutozuk): the WORKERS run each tile's sims and reduce
+// them (buildSummary) — exactly like the original, fully parallel and barrier-free.
+// After a cheap first pass, selectAutozukSurvivors keeps only the tiles that could be
+// in the best handful (CI overlaps the k-th best), which phase 2 deep-samples.
+// =====================================================
+
+// Reduce a tile's accumulated rollouts to the summary the UI consumes (identical
+// shape + thresholds to the old worker reduction) plus exact counts and an isPartial
+// flag used by the elimination math and progressive rendering.
+function buildSummary(rollouts,spawnCode,pillarConfig,loadout,maxTicks,isPartial){
+  let allResults=rollouts.filter(Boolean);
+  if(allResults.length===0)return null;
+  let prayer=optimizePrayer(allResults,spawnCode,pillarConfig,loadout);
+  let damages=[],completionTicks=[];
+  let invalidCount=0,deathCount=0;
+  for(let r of allResults){
+    if(r.status==='invalid'){invalidCount++;continue;}
+    let res=calcSimDamage(r.attacks,prayer.sequence,loadout,r.mobInitHP);
+    if(res.died)deathCount++;
+    damages.push(res.damage);completionTicks.push(r.completedTick);
+  }
+  let deathPct=damages.length>0?(deathCount/damages.length*100):0;
+  let avgDmg=damages.length>0?damages.reduce((a,b)=>a+b,0)/damages.length:999;
+  let over50=damages.filter(d=>d>50).length;
+  let avgTicks=completionTicks.length>0?completionTicks.reduce((a,b)=>a+b,0)/completionTicks.length:maxTicks;
+  let isMostlyDead=deathPct>30;
+  let invalidPct=allResults.length>0?(invalidCount/allResults.length*100):0;
+  let isMostlyInvalid=invalidPct>20;
+  return {
+    avgDamage:avgDmg, damages, completionTicks,
+    over50Pct:damages.length>0?(over50/damages.length*100):100,
+    avgTicks, avgTime:(avgTicks*0.6).toFixed(1),
+    prayer:prayer.sequence, invalidPct,
+    totalSims:allResults.length, deathPct, markedDead:isMostlyDead||isMostlyInvalid,
+    isPartial:!!isPartial, deathCount, validCount:damages.length, invalidCount
+  };
+}
+
+// --- statistics helpers ---
+function azInvNormCdf(p){
+  // Acklam's inverse normal CDF approximation; p in (0,1).
+  if(p<=0)return -Infinity;if(p>=1)return Infinity;
+  let a=[-3.969683028665376e+01,2.209460984245205e+02,-2.759285104469687e+02,1.383577518672690e+02,-3.066479806614716e+01,2.506628277459239e+00];
+  let b=[-5.447609879822406e+01,1.615858368580409e+02,-1.556989798598866e+02,6.680131188771972e+01,-1.328068155288572e+01];
+  let c=[-7.784894002430293e-03,-3.223964580411365e-01,-2.400758277161838e+00,-2.549732539343734e+00,4.374664141464968e+00,2.938163982698783e+00];
+  let d=[7.784695709041462e-03,3.224671290700398e-01,2.445134137142996e+00,3.754408661907416e+00];
+  let plow=0.02425,phigh=1-plow,q,r;
+  if(p<plow){q=Math.sqrt(-2*Math.log(p));return(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);}
+  if(p<=phigh){q=p-0.5;r=q*q;return(((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q/(((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);}
+  q=Math.sqrt(-2*Math.log(1-p));return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
+}
+function azZCrit(alpha){return azInvNormCdf(1-alpha/2);} // two-sided critical value
+function azWilson(k,n,alpha){
+  if(n<=0)return {lo:0,hi:1};
+  let z=azZCrit(alpha),p=k/n,den=1+z*z/n;
+  let center=(p+z*z/(2*n))/den;
+  let margin=z*Math.sqrt(p*(1-p)/n+z*z/(4*n*n))/den;
+  return {lo:Math.max(0,center-margin),hi:Math.min(1,center+margin)};
+}
+// Confidence interval on a tile's PRIMARY scalar (lower = better):
+// blood-barrage -> deathPct (Wilson); otherwise -> mean damage (Student-t approx).
+function azScoreCI(summary,alpha,loadout){
+  if(loadout&&loadout.isBloodBarrage){
+    let n=summary.validCount,k=summary.deathCount;
+    if(n<1)return {value:summary.deathPct,lo:-Infinity,hi:Infinity};
+    let w=azWilson(k,n,alpha);
+    return {value:summary.deathPct,lo:w.lo*100,hi:w.hi*100};
+  }
+  let dmg=summary.damages,n=dmg.length;
+  if(n<2)return {value:summary.avgDamage,lo:-Infinity,hi:Infinity};
+  let mean=summary.avgDamage,varc=0;
+  for(let x of dmg)varc+=(x-mean)*(x-mean);
+  varc/=(n-1);
+  let half=azZCrit(alpha)*(1+1/(4*(n-1)))*Math.sqrt(varc/n);
+  return {value:mean,lo:mean-half,hi:mean+half};
+}
+// A tile is a hard loser when, with confidence 1-alpha, it crosses the markedDead
+// thresholds (death>30% or invalid>20%) — uses the Wilson LOWER bound so we only
+// kill when certain. Matches buildSummary's markedDead definition.
+function azIsHardLoser(summary,alpha){
+  if(summary.validCount>0&&azWilson(summary.deathCount,summary.validCount,alpha).lo>0.30)return true;
+  if(summary.totalSims>0&&azWilson(summary.invalidCount,summary.totalSims,alpha).lo>0.20)return true;
+  return false;
+}
+// One-shot survivor selection after the cheap phase-1 pass: keep every tile that could
+// still be in the top-k given phase-1 noise (its score CI overlaps the k-th best's),
+// dropping only confident hard-losers. Survivors are deep-sampled in phase 2; everyone
+// else keeps their coarse (isPartial) summary. `summaries` is a {key: summary} map.
+function selectAutozukSurvivors(summaries,opts){
+  let arms=Object.keys(summaries).filter(k=>summaries[k]).map(k=>({key:k,
+    ci:azScoreCI(summaries[k],opts.alpha,opts.loadout),hard:azIsHardLoser(summaries[k],opts.alpha)}));
+  let contenders=arms.filter(a=>!a.hard);
+  if(contenders.length===0)contenders=arms.slice();   // all hard-losers: keep all (least-bad fallback)
+  if(contenders.length===0)return new Set();          // no summaries at all: nothing to keep
+  contenders.sort((a,b)=>a.ci.value-b.ci.value);
+  let k=Math.min(opts.topK,contenders.length);
+  let cutHi=contenders[k-1].ci.hi;
+  let keep=new Set();
+  for(let a of contenders)if(a.ci.lo<=cutHi)keep.add(a.key);
+  return keep;
+}
 </script>
 <script id="autozuk-worker" type="text/worker-source">
 // === AUTOZUK Worker ===
+// Runs a tile's sims AND reduces them to a summary (off the main thread, fully parallel).
+// The main thread only decides how many sims each tile gets (cheap phase-1 pass, then a
+// deep pass on the surviving best handful — see startAutozuk). seedIndices are 0..maxSims-1.
 // Messages in:
 //   {type:'init', pillarConfig, loadout}
 //   {type:'exclude', tiles:[{x,y}], spawnCode}
-//   {type:'simulate', tile:{x,y}, spawnCode, loadout, maxTicks, maxSims, seedBase}
+//   {type:'simulate', tile:{x,y}, spawnCode, maxTicks, maxSims, seedBase, isPartial}
 // Messages out:
 //   {type:'init-ok'}
 //   {type:'exclude-result', excluded:[{x,y}], eligible:[{x,y}]}
-//   {type:'simulate-result', tile, summary} where summary matches autozukResults[key]
+//   {type:'simulate-result', tile, summary}  // summary built by buildSummary (sim-core)
 let W = { region: null, pillarConfig: null, loadout: null };
 self.onmessage = function(e){
   let msg = e.data;
@@ -1252,56 +1374,12 @@ self.onmessage = function(e){
     return;
   }
   if(msg.type === 'simulate'){
-    let tile = msg.tile;
-    let loadout = msg.loadout;
-    let maxTicks = msg.maxTicks;
-    let maxSims = msg.maxSims;
-    let seedBase = msg.seedBase;
-    let allResults = [];
-    for(let s=0;s<maxSims;s++){
-      let seed = (seedBase ^ (tile.x*73856093) ^ (tile.y*19349663) ^ (s*83492791)) >>> 0;
-      let result = hlRunSim(msg.spawnCode, tile, W.pillarConfig, loadout, maxTicks, W.region, seed);
-      if(result) allResults.push(result);
-      if(s===2 && allResults.length>=3){
-        let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
-        let allDead = allResults.every(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).died);
-        if(allDead) break;
-      }
-      if(s===9 && allResults.length>=10){
-        let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
-        let quickDmgs = allResults.map(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).damage);
-        let quickAvg = quickDmgs.reduce((a,b)=>a+b,0)/quickDmgs.length;
-        if(quickAvg>80) break;
-      }
+    let rollouts = [];
+    for(let s=0;s<msg.maxSims;s++){
+      rollouts.push(runRollout(msg.spawnCode, msg.tile, W.pillarConfig, W.loadout, msg.maxTicks, W.region, msg.seedBase, s));
     }
-    if(allResults.length === 0){
-      self.postMessage({type:'simulate-result', tile, summary: null});
-      return;
-    }
-    let prayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
-    let damages = [], completionTicks = [];
-    let invalidCount = 0, deathCount = 0;
-    for(let r of allResults){
-      if(r.status==='invalid'){invalidCount++; continue;}
-      let res = calcSimDamage(r.attacks, prayer.sequence, loadout, r.mobInitHP);
-      if(res.died) deathCount++;
-      damages.push(res.damage); completionTicks.push(r.completedTick);
-    }
-    let deathPct = damages.length>0 ? (deathCount/damages.length*100) : 0;
-    let avgDmg = damages.length>0 ? damages.reduce((a,b)=>a+b,0)/damages.length : 999;
-    let over50 = damages.filter(d=>d>50).length;
-    let avgTicks = completionTicks.length>0 ? completionTicks.reduce((a,b)=>a+b,0)/completionTicks.length : maxTicks;
-    let isMostlyDead = deathPct > 30;
-    let invalidPct = allResults.length>0 ? (invalidCount/allResults.length*100) : 0;
-    let isMostlyInvalid = invalidPct > 20;
-    let summary = {
-      avgDamage: avgDmg, damages, completionTicks,
-      over50Pct: damages.length>0 ? (over50/damages.length*100) : 100,
-      avgTicks, avgTime: (avgTicks*0.6).toFixed(1),
-      prayer: prayer.sequence, invalidPct,
-      totalSims: allResults.length, deathPct, markedDead: isMostlyDead || isMostlyInvalid
-    };
-    self.postMessage({type:'simulate-result', tile, summary});
+    let summary = buildSummary(rollouts, msg.spawnCode, W.pillarConfig, W.loadout, msg.maxTicks, msg.isPartial);
+    self.postMessage({type:'simulate-result', tile: msg.tile, summary});
     return;
   }
 };
@@ -2308,11 +2386,13 @@ function render(){
         ctx.strokeStyle='#ff000022';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(px+TILE_SIZE,py+TILE_SIZE);ctx.stroke();continue}
       let result=autozukResults[key];
       if(result){
+        ctx.globalAlpha=result.isPartial?0.45:1;
         let fx=x-ARENA_X_MIN,fy=y-ARENA_Y_MIN;
         if(result.markedDead){ctx.fillStyle=heatmapBlended(99,fx,fy,0.9);ctx.fillRect(px+1,py+1,TILE_SIZE-2,TILE_SIZE-2);
           if(TILE_SIZE>=12){ctx.fillStyle='#888';ctx.font=`bold ${Math.max(8,TILE_SIZE*0.5)}px JetBrains Mono`;ctx.textAlign='center';ctx.textBaseline='middle';drawFlipText('\u2620',px+TILE_SIZE/2,py+TILE_SIZE/2)}
         } else {let heat=autozukHeatValue(result);ctx.fillStyle=heatmapBlended(heat,fx,fy);ctx.fillRect(px+1,py+1,TILE_SIZE-2,TILE_SIZE-2);
           if(TILE_SIZE>=16){ctx.fillStyle=heat>60?'#888':heat<20?'#000':'#fff';ctx.font=`bold ${Math.max(7,TILE_SIZE*0.4)}px JetBrains Mono`;ctx.textAlign='center';ctx.textBaseline='middle';drawFlipText(autozukScoreText(result),px+TILE_SIZE/2,py+TILE_SIZE/2)}}
+        ctx.globalAlpha=1;
       }
     }}
     // Highlight selected tile
@@ -2811,7 +2891,6 @@ async function startAutozuk(){
   document.getElementById('liveFeedPanel').style.display='block';
   document.getElementById('liveFeedPanel').innerHTML='';
   startSolverBuzz();
-  let liveFeedEntries=0;
 
   let maxSims=parseInt(document.getElementById('maxSims').value)||400;
   let maxTicks=parseInt(document.getElementById('maxTicks').value)||400;
@@ -2859,44 +2938,68 @@ async function startAutozuk(){
 
   setStatus(`${eligibleTiles.length} tiles to simulate, ${excludedTiles.size} excluded`,'info');
 
-  // STEP 2: Simulate each eligible tile (parallel, in workers)
-  let totalTiles=eligibleTiles.length,completedTiles=0;
-  document.getElementById('autozukStatus').textContent=`Simulating ${totalTiles} tiles across ${poolSize} workers...`;
+  // STEP 2: Two-phase adaptive sampling. Phase 1 is a cheap scan of every tile; each
+  // WORKER reduces its own tile (fully parallel, no main-thread stalls \u2014 same smooth
+  // pipeline as the original). One confidence cut then keeps the tiles that could be in
+  // the best handful, and phase 2 deep-samples just those to the full maxSims depth.
+  // Set window.__azBruteForce=true to skip pruning (full run, for A/B timing).
+  let totalTiles=eligibleTiles.length;
+  let topK=Math.max(1,parseInt(document.getElementById('topK')?.value)||8);
   let seedBase=(Date.now()&0xffffffff)>>>0;
+  let bruteForce=!!window.__azBruteForce;
+  let phase1Sims=bruteForce?maxSims:Math.min(40,maxSims);
   startSolverVisualPreview(code,loadout,maxTicks,maxSims,seedBase);
+  let completedBatches=0;
+  function paintTile(tile,summary){
+    if(!summary)return;
+    autozukResults[`${tile.x},${tile.y}`]=summary;
+    playScoreBlip(summary.avgDamage);
+    registerSolverVisualPreview(tile,++completedBatches);
+    updateLiveDetail(tile.x,tile.y,summary);
+    let prayLabels={mage:'M',range:'R',melee:'X'};
+    let displayHeat=autozukHeatValue(summary,loadout);
+    let dmgRound=autozukScoreText(summary,loadout);
+    let dmgColor=heatmapColor(displayHeat,1);
+    let prayHtml=[1,2,3,0].map(i=>summary.prayer[i]).map(p=>`<div class="fp ${p}">${prayLabels[p]}</div>`).join('');
+    let barW=Math.min(100,displayHeat);
+    let deathLabel=summary.markedDead?(loadout.isBloodBarrage?' \u2620':` \u2620${Math.round(summary.deathPct)}%`):'';
+    let simsLabel=summary.isPartial?`~${summary.totalSims}`:`${summary.totalSims}`;
+    let feedPanel=document.getElementById('liveFeedPanel');
+    let rowId=`feed-${tile.x}-${tile.y}`,row=document.getElementById(rowId),fresh=!row;
+    if(fresh){row=document.createElement('div');row.className='feed-row';row.id=rowId;}
+    row.style.borderLeftColor=dmgColor;
+    row.innerHTML=`<span class="feed-tile">(${tile.x},${tile.y})</span><span class="feed-dmg" style="color:${dmgColor}">${dmgRound}${deathLabel}</span><div class="feed-bar"><div class="feed-bar-inner" style="width:${barW}%;background:${dmgColor}"></div></div><div class="feed-prayer">${prayHtml}</div><span class="feed-sims">${simsLabel}</span>`;
+    if(fresh){feedPanel.appendChild(row);feedPanel.scrollTop=feedPanel.scrollHeight;}
+  }
 
-  await Promise.all(eligibleTiles.map(tile=>{
-    return window._autozukPool.dispatch({
-      type:'simulate', tile, spawnCode:code, loadout, maxTicks, maxSims, seedBase
+  // Phase 1: cheap scan of every eligible tile (workers reduce in parallel).
+  document.getElementById('autozukStatus').textContent=`Phase 1: scanning ${totalTiles} tiles...`;
+  let p1Done=0;
+  await Promise.all(eligibleTiles.map(tile=>window._autozukPool.dispatch({
+    type:'simulate', tile, spawnCode:code, maxTicks, maxSims:phase1Sims, seedBase, isPartial:!bruteForce
+  }).then(res=>{
+    p1Done++; paintTile(tile,res.summary);
+    let span=bruteForce?80:45;
+    document.getElementById('progressFill').style.width=(20+Math.floor(p1Done/Math.max(1,totalTiles)*span))+'%';
+    if(p1Done%16===0)render();
+  })));
+  render();
+
+  // Phase 2: deep-sample only the surviving best handful (skipped in brute-force mode).
+  if(!bruteForce){
+    let survivors=selectAutozukSurvivors(autozukResults,{topK,alpha:0.02,loadout});
+    let survList=eligibleTiles.filter(t=>survivors.has(`${t.x},${t.y}`));
+    document.getElementById('autozukStatus').textContent=`Phase 2: deep-sampling ${survList.length} candidates...`;
+    let p2Done=0;
+    await Promise.all(survList.map(tile=>window._autozukPool.dispatch({
+      type:'simulate', tile, spawnCode:code, maxTicks, maxSims, seedBase, isPartial:false
     }).then(res=>{
-      completedTiles++;
-      let pct=20+Math.floor(completedTiles/totalTiles*80);
-      document.getElementById('progressFill').style.width=pct+'%';
-      document.getElementById('autozukStatus').textContent=`Simulated ${completedTiles}/${totalTiles} tiles`;
-      if(res.summary){
-        let key=`${tile.x},${tile.y}`;
-        autozukResults[key]=res.summary;
-        playScoreBlip(res.summary.avgDamage);
-        registerSolverVisualPreview(tile,completedTiles);
-        updateLiveDetail(tile.x,tile.y,res.summary);
-        liveFeedEntries++;
-        let prayLabels={mage:'M',range:'R',melee:'X'};
-        let displayHeat=autozukHeatValue(res.summary,loadout);
-        let dmgRound=autozukScoreText(res.summary,loadout);
-        let dmgColor=heatmapColor(displayHeat,1);
-        let prayHtml=[1,2,3,0].map(i=>res.summary.prayer[i]).map(p=>`<div class="fp ${p}">${prayLabels[p]}</div>`).join('');
-        let barW=Math.min(100,displayHeat);
-        let row=document.createElement('div');row.className='feed-row';
-        row.style.borderLeftColor=dmgColor;
-        let deathLabel=res.summary.markedDead?(loadout.isBloodBarrage?' \u2620':` \u2620${Math.round(res.summary.deathPct)}%`):'';
-        row.innerHTML=`<span class="feed-tile">(${tile.x},${tile.y})</span><span class="feed-dmg" style="color:${dmgColor}">${dmgRound}${deathLabel}</span><div class="feed-bar"><div class="feed-bar-inner" style="width:${barW}%;background:${dmgColor}"></div></div><div class="feed-prayer">${prayHtml}</div><span class="feed-sims">${res.summary.totalSims}</span>`;
-        let feedPanel=document.getElementById('liveFeedPanel');
-        feedPanel.appendChild(row);
-        feedPanel.scrollTop=feedPanel.scrollHeight;
-      }
-      render();
-    });
-  }));
+      p2Done++; paintTile(tile,res.summary);
+      document.getElementById('progressFill').style.width=(65+Math.floor(p2Done/Math.max(1,survList.length)*34))+'%';
+      if(p2Done%4===0)render();
+    })));
+    render();
+  }
 
   // Tear down the pool now that the batch is complete
   if(window._autozukPool){ window._autozukPool.terminate(); window._autozukPool=null; }
@@ -2915,8 +3018,11 @@ async function startAutozuk(){
   document.getElementById('phase1Panel').style.display='';
 
   // Find best tile. Blood Barrage prioritizes survival first, then HP deficit.
-  let bestKey=null,bestResult=null;
-  for(let key in autozukResults){let result=autozukResults[key];if(isBetterAutozukResult(result,bestResult,currentLoadout)){bestResult=result;bestKey=key}}
+  // Prefer the deeply-sampled (non-partial) survivors; only if every tile was
+  // eliminated early (e.g. an all-death wave) fall back to ranking partials too.
+  let bestKey=null,bestResult=null,anyFinal=false;
+  for(let key in autozukResults){let result=autozukResults[key];if(result.isPartial)continue;anyFinal=true;if(isBetterAutozukResult(result,bestResult,currentLoadout)){bestResult=result;bestKey=key}}
+  if(!anyFinal){for(let key in autozukResults){let result=autozukResults[key];if(isBetterAutozukResult(result,bestResult,currentLoadout)){bestResult=result;bestKey=key}}}
   if(bestKey){
     let[bx,by]=bestKey.split(',').map(Number);
     selectedTile={x:bx,y:by};playerPlacement={x:bx,y:by};activePrayerSeq=autozukResults[bestKey].prayer;
@@ -2973,7 +3079,7 @@ function showTileDetail(x,y){
     <div class="detail-stat"><span class="label">${over50Label}</span><span class="value ${o50Class}">${result.over50Pct.toFixed(1)}%</span></div>
     <div class="detail-stat"><span class="label">Avg Completion</span><span class="value">${Math.round(result.avgTicks)} ticks (${result.avgTime}s)</span></div>
     <div class="detail-stat"><span class="label">Invalid Runs</span><span class="value">${result.invalidPct.toFixed(1)}%</span></div>
-    <div class="detail-stat"><span class="label">Total Sims</span><span class="value">${result.totalSims}</span></div>
+    <div class="detail-stat"><span class="label">Total Sims</span><span class="value">${result.totalSims}${result.isPartial?' (partial)':''}</span></div>
     ${deathRateRow}
     <div style="margin-top:12px"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.5px">Damage Distribution</label></div>
     <div class="histogram"><canvas id="histCanvas" width="340" height="70"></canvas></div>
@@ -3019,7 +3125,7 @@ function updateLiveDetail(x,y,result){
     <div class="detail-stat"><span class="label">${scoreLabel}</span><span class="value ${dmgClass}">${result.avgDamage.toFixed(1)}</span></div>
     <div class="detail-stat"><span class="label">${over50Label}</span><span class="value ${o50Class}">${result.over50Pct.toFixed(1)}%</span></div>
     <div class="detail-stat"><span class="label">Avg Completion</span><span class="value">${Math.round(result.avgTicks)} ticks (${result.avgTime}s)</span></div>
-    <div class="detail-stat"><span class="label">Sims</span><span class="value">${result.totalSims}</span></div>
+    <div class="detail-stat"><span class="label">Sims</span><span class="value">${result.totalSims}${result.isPartial?' (partial)':''}</span></div>
     <div style="margin-top:8px"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.5px">Prayer Sequence</label></div>
     ${prayerHtml}
     <div style="margin-top:8px"><label style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.5px">Damage Distribution</label></div>

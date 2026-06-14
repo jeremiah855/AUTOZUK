@@ -77,7 +77,7 @@ self._test.splitPrayer = optimizePrayer(
 ).sequence;
 self.onmessage({ data: { type:'init', pillarConfig:{S:true,W:true,N:true}, loadout: LOADOUTS.blowpipe } });
 self.onmessage({ data: { type:'exclude', tiles:[{x:5,y:5},{x:15,y:15},{x:11,y:24}], spawnCode:'MRYBXOOOO' } });
-self.onmessage({ data: { type:'simulate', tile:{x:15,y:15}, spawnCode:'MRYBXOOOO', loadout: LOADOUTS.blowpipe, maxTicks:400, maxSims:20, seedBase:42 } });
+self.onmessage({ data: { type:'simulate', tile:{x:15,y:15}, spawnCode:'MRYBXOOOO', maxTicks:400, maxSims:20, seedBase:42, isPartial:false } });
 `;
 vm.runInContext(probe, ctx);
 function assertEqual(actual, expected, label) {
@@ -100,6 +100,15 @@ assertEqual(self._test.singleRangerPrayer, ['range','range','range','range'], 's
 assertEqual(self._test.splitPrayer, ['melee','melee','range','range'], 'neighbor prayer fill');
 console.log('OK init:', posted[0]);
 console.log('OK exclude:', posted[1].excluded.length, 'excluded,', posted[1].eligible.length, 'eligible');
-console.log('OK simulate:', posted[2].summary
-  ? `avgDamage=${posted[2].summary.avgDamage.toFixed(1)}, totalSims=${posted[2].summary.totalSims}, prayer=${JSON.stringify(posted[2].summary.prayer)}`
-  : 'null summary');
+const sr = posted[2];
+if (sr.type !== 'simulate-result' || sr.tile.x !== 15 || !sr.summary) {
+  console.error('FAIL simulate: bad envelope', JSON.stringify({ type: sr.type, hasSummary: !!sr.summary }));
+  process.exit(1);
+}
+const s = sr.summary;
+for (const f of ['avgDamage', 'prayer', 'markedDead', 'deathPct', 'damages', 'totalSims', 'isPartial']) {
+  if (!(f in s)) { console.error('FAIL simulate: summary missing ' + f); process.exit(1); }
+}
+if (s.prayer.length !== 4) { console.error('FAIL simulate: prayer length ' + s.prayer.length); process.exit(1); }
+if (s.isPartial !== false) { console.error('FAIL simulate: isPartial flag not honored'); process.exit(1); }
+console.log(`OK simulate: avgDamage=${s.avgDamage.toFixed(1)}, totalSims=${s.totalSims}, prayer=${JSON.stringify(s.prayer)}, isPartial=${s.isPartial}`);
