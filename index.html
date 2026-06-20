@@ -695,7 +695,9 @@ function hlCreateMob(type,x,y,id){
   return{id,type,x,y,size:d.size,hp:d.hp,maxHp:d.hp,atkSpeed:d.atkSpeed,range:d.range,style:d.style,
     attackDelay:0,stunned:0,frozen:0,dead:false,dying:-1,dyingStartTick:-1,corpseRemovalTick:undefined,revivedOnce:false,hasLOS:false,hadLOS:false,
     isBlob:d.isBlob||false,blobScanPrayer:null,hasDig:d.hasDig||false,digTimer:0,digLocation:null,
-    hasFlicker:d.hasFlicker||false,flickering:false,incomingProjectiles:[],noLOSTicks:0,currentStyle:null};
+    hasFlicker:d.hasFlicker||false,flickering:false,incomingProjectiles:[],noLOSTicks:0,currentStyle:null,
+    // Pre-declared so every mob shares one hidden class. These are assigned later.
+    infNum:undefined,aggroTarget:undefined,parentBlobId:undefined,pendingRemovalTick:undefined,_lastScanTick:undefined};
 }
 function hlCreatePlayer(x,y,loadout){
   let startHp=loadoutStartingHp(loadout),maxHp=Math.max(startHp,loadoutBloodMaxHp(loadout));
