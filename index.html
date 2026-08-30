@@ -443,17 +443,6 @@ function distToMob(px,py,mob){
 }
 function collidesWithEntities(x,y,s,entities){for(let i=0;i<entities.length;i++){let e=entities[i];if(collisionMath(x,y,s,e.x,e.y,e.size))return true}return false}
 function collidesWithMobs(x,y,s,mobs,exclude,skipNibblers){for(let i=0;i<mobs.length;i++){let m=mobs[i];if(m===exclude||m.dead)continue;if(exclude&&exclude.parentBlobId===m.id&&m.dying>0)continue;if(skipNibblers&&m.type==='nibbler')continue;if(collisionMath(x,y,s,m.x,m.y,m.size))return m}return null}
-// Any live non-nibbler mob (except `exclude`) overlapping the tile rect [x0..x1]x[y0..y1]?
-// Same skip rules as collidesWithMobs with skipNibblers=true, but one footprint-overlap
-// test per mob instead of one collidesWithMobs scan per edge tile.
-function stripHitsMob(x0,x1,y0,y1,mobs,exclude){
-  for(let i=0;i<mobs.length;i++){let m=mobs[i];
-    if(m===exclude||m.dead)continue;
-    if(exclude.parentBlobId===m.id&&m.dying>0)continue;
-    if(m.type==='nibbler')continue;
-    if(x0<=m.x+m.size-1&&x1>=m.x&&y0<=m.y&&y1>=m.y-m.size+1)return true}
-  return false;
-}
 function rangedDelay(dist){if(dist<=4)return 2;if(dist<=8)return 3;if(dist<=11)return 4;return 5}
 function magicDelay(dist){if(dist<=6)return 2;if(dist<=10)return 3;if(dist<=14)return 4;return 5}
 function magerDelay(dist){if(dist<=5)return 2;if(dist<=9)return 3;if(dist<=13)return 4;return 5}
@@ -970,10 +959,22 @@ function hlCanMove(mob,xOff,yOff,region,mobs){
   if(xOff===0&&yOff===0)return true;
   let s=mob.size,dx=xOff,dy=-yOff;
   let nx=mob.x+dx,ny=mob.y+dy,bl=region.blocked,isNib=mob.type==='nibbler';
-  if(dx===-1){for(let i=0;i<s;i++)if(bl[(nx<<6)|(ny-i)])return false;if(!isNib&&stripHitsMob(nx,nx,ny-s+1,ny,mobs,mob))return false}
-  else if(dx===1){let rx=nx+s-1;for(let i=0;i<s;i++)if(bl[(rx<<6)|(ny-i)])return false;if(!isNib&&stripHitsMob(rx,rx,ny-s+1,ny,mobs,mob))return false}
-  if(dy===1){for(let i=0;i<s;i++)if(bl[((nx+i)<<6)|ny])return false;if(!isNib&&stripHitsMob(nx,nx+s-1,ny,ny,mobs,mob))return false}
-  else if(dy===-1){let by=ny-s+1;for(let i=0;i<s;i++)if(bl[((nx+i)<<6)|by])return false;if(!isNib&&stripHitsMob(nx,nx+s-1,by,by,mobs,mob))return false}
+  // A single pass over the mob list tests the moved edge strips as rectangles.
+  // An unset strip keeps x1 below x0 so it can never match.
+  let ax0=0,ax1=-1,ay0=0,ay1=-1,bx0=0,bx1=-1,by0=0,by1=-1;
+  if(dx===-1){for(let i=0;i<s;i++)if(bl[(nx<<6)|(ny-i)])return false;ax0=nx;ax1=nx;ay0=ny-s+1;ay1=ny}
+  else if(dx===1){let rx=nx+s-1;for(let i=0;i<s;i++)if(bl[(rx<<6)|(ny-i)])return false;ax0=rx;ax1=rx;ay0=ny-s+1;ay1=ny}
+  if(dy===1){for(let i=0;i<s;i++)if(bl[((nx+i)<<6)|ny])return false;bx0=nx;bx1=nx+s-1;by0=ny;by1=ny}
+  else if(dy===-1){let ey=ny-s+1;for(let i=0;i<s;i++)if(bl[((nx+i)<<6)|ey])return false;bx0=nx;bx1=nx+s-1;by0=ey;by1=ey}
+  if(isNib)return true;
+  for(let i=0;i<mobs.length;i++){let m=mobs[i];
+    if(m===mob||m.dead)continue;
+    if(mob.parentBlobId===m.id&&m.dying>0)continue;
+    if(m.type==='nibbler')continue;
+    let mx1=m.x+m.size-1,my0=m.y-m.size+1;
+    if(ax1>=ax0&&ax0<=mx1&&ax1>=m.x&&ay0<=m.y&&ay1>=my0)return false;
+    if(bx1>=bx0&&bx0<=mx1&&bx1>=m.x&&by0<=m.y&&by1>=my0)return false;
+  }
   return true;
 }
 function hlMobAttack(mob,player,region,mobs,tick,S){
