@@ -771,6 +771,15 @@ function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed)
   for(let m of mobs){mobInitHP[m.id]={hp:m.hp,type:m.type};mobMap.set(m.id,m)}
   return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng,deadCount:0};
 }
+// One shared shape for every attack log record keeps the damage loops
+// monomorphic. Unset fields read exactly as absent fields would.
+function mkAttackRecord(tick){
+  return{tick,mobId:undefined,mobType:undefined,style:undefined,isScan:false,scanTick:undefined,
+    accRoll:undefined,dmgRoll:undefined,distAtFire:undefined,hitTick:undefined,
+    isPlayerAttack:false,playerDmg:undefined,targetMobId:undefined,targetMobType:undefined,
+    isRevive:false,reviveHp:undefined,
+    isPillarCollapsePlayerDamage:false,isPillarCollapseMobDamage:false,pillarId:undefined,damage:undefined,killsNibbler:false};
+}
 function hlMarkMobForProjectileRemoval(mob,tick){
   if(mob.dead)return;
   mob.hp=0;
@@ -804,7 +813,7 @@ function hlDamagePillar(pillar,damage,tick,S){
   pillar.hp=Math.max(0,pillar.hp-damage);
   if(pillar.hp>0)return;
   let hitPlayer=beginPillarCollapse(pillar,tick,S.mobs,S.player);
-  if(hitPlayer)S.attacks.push({tick,isPillarCollapsePlayerDamage:true,pillarId:pillar.id});
+  if(hitPlayer){let a=mkAttackRecord(tick);a.isPillarCollapsePlayerDamage=true;a.pillarId=pillar.id;S.attacks.push(a)}
 }
 function hlProcessPillarTransitions(S,tick){
   if(!S.dynamicPillars)return;
@@ -814,7 +823,7 @@ function hlProcessPillarTransitions(S,tick){
       let mob=S.mobMap.get(mobId);
       if(!mob||mob.dead||mob.dying>0||mob.hp<=0)continue;
       let damage=mob.type==='nibbler'?mob.hp:Math.floor(mob.hp/2);
-      if(damage>0){mob.hp-=damage;S.attacks.push({tick,isPillarCollapseMobDamage:true,pillarId:pillar.id,mobId:mob.id,damage,killsNibbler:mob.type==='nibbler'});if(mob.hp<=0)hlMarkMobForProjectileRemoval(mob,tick-1)}
+      if(damage>0){mob.hp-=damage;let a=mkAttackRecord(tick);a.isPillarCollapseMobDamage=true;a.pillarId=pillar.id;a.mobId=mob.id;a.damage=damage;a.killsNibbler=mob.type==='nibbler';S.attacks.push(a);if(mob.hp<=0)hlMarkMobForProjectileRemoval(mob,tick-1)}
     }
     removePillarCollision(S.region,pillar);
   }
@@ -875,7 +884,7 @@ function hlTick(S){
     target.incomingProjectiles.push({delay,damage:dmg});
     // Record player attack event for post HP calculation. Damage is rolled now,
     // but mob HP/death is applied when the projectile lands.
-    S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:dmg,targetMobId:target.id,targetMobType:target.type,hitTick:t+delay});
+    {let a=mkAttackRecord(t);a.isPlayerAttack=true;a.playerDmg=dmg;a.targetMobId=target.id;a.targetMobType=target.type;a.hitTick=t+delay;S.attacks.push(a)}
     // Blood barrage: 3x3 AOE around target's SW tile
     if(loadout.isBloodBarrage){
       let hitCount=1; // primary target already hit
@@ -894,7 +903,7 @@ function hlTick(S){
             let sDmg=sHit?Math.floor(S.rng()*(loadout.maxHit+1)):0;
             let sDelay=playerProjectileDelay(loadout,player.x,player.y,m);
             m.incomingProjectiles.push({delay:sDelay,damage:sDmg});
-            S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:sDmg,targetMobId:m.id,targetMobType:m.type,hitTick:t+sDelay});
+            {let a=mkAttackRecord(t);a.isPlayerAttack=true;a.playerDmg=sDmg;a.targetMobId=m.id;a.targetMobType=m.type;a.hitTick=t+sDelay;S.attacks.push(a)}
             break; // one mob per offset tile
           }
         }
@@ -951,13 +960,13 @@ function hlMobAttack(mob,player,region,mobs,tick,S){
   if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
     if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;if(toRes.dead)S.deadCount--;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
       let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;if(!mobs.includes(toRes))mobs.push(toRes);
-      S.attacks.push({tick,mobId:toRes.id,mobType:toRes.type,isRevive:true,reviveHp});
+      {let a=mkAttackRecord(tick);a.mobId=toRes.id;a.mobType=toRes.type;a.isRevive=true;a.reviveHp=reviveHp;S.attacks.push(a)}
       mob.attackDelay=mob.atkSpeed*2;return}
     hlFireAttack(mob,player,tick,S);mob.attackDelay=mob.atkSpeed;return}
   if(mob.isBlob){if(!mob.hasLOS&&!mob.blobScanPrayer)return;
     if(mob.hasLOS&&(!mob.hadLOS||(!mob.blobScanPrayer&&mob.attackDelay<=0))){mob.blobScanPrayer='scanned';mob.attackDelay=mob.atkSpeed;mob._lastScanTick=tick;
       mob.currentStyle=S.rng()<0.5?'magic':'range';
-      S.attacks.push({tick,mobId:mob.id,mobType:'blob',style:null,isScan:true,scanTick:tick,accRoll:0,dmgRoll:0});return}
+      {let a=mkAttackRecord(tick);a.mobId=mob.id;a.mobType='blob';a.style=null;a.isScan=true;a.scanTick=tick;a.accRoll=0;a.dmgRoll=0;S.attacks.push(a)}return}
     if(mob.blobScanPrayer&&mob.attackDelay<=0){hlFireAttack(mob,player,tick,S,'blob_attack',mob._lastScanTick||tick-3);mob.blobScanPrayer=null;mob.attackDelay=mob.atkSpeed}return}
   if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
   let actualStyle=mob.style;
@@ -977,9 +986,9 @@ function hlFireAttack(mob,player,tick,S,styleOrBlobFlag,scanTick){
   // last_attacker is set when mob fires, not when projectile lands
   setPlayerLastAttacker(player,mob);
   // Record attack event for prayer analysis
-  S.attacks.push({tick,mobId:mob.id,mobType:mob.type,style:isBlob?null:style,isScan:false,
-    scanTick:isBlob?(scanTick||tick-3):-1,
-    accRoll:S.rng(),dmgRoll:S.rng(),distAtFire:edgeDist,hitTick:tick+delay});
+  {let a=mkAttackRecord(tick);a.mobId=mob.id;a.mobType=mob.type;a.style=isBlob?null:style;
+    a.scanTick=isBlob?(scanTick||tick-3):-1;
+    a.accRoll=S.rng();a.dmgRoll=S.rng();a.distAtFire=edgeDist;a.hitTick=tick+delay;S.attacks.push(a)}
 }
 function hlSpawnBlobletsFromBlob(blob,tick,S){
   let mobs=S.mobs;
