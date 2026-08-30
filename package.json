@@ -1,0 +1,10 @@
+{
+  "name": "autozuk",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node scripts/run-tests.js",
+    "expect:update": "node scripts/check-expect.js --update"
+  },
+  "license": "MIT"
+}

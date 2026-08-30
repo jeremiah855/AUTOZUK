@@ -1,0 +1,27 @@
+{
+  "maxTicks": 400,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "overall": "c034d7cb",
+  "scenarios": {
+    "full/center/blowpipe": "36133339",
+    "full/center/ayak": "09553d84",
+    "full/center/barrage": "8a4a0166",
+    "full/corner/blowpipe": "500191fa",
+    "blobs/blowpipe": "77b55023",
+    "blobs/ayak": "8816dcfa",
+    "meleers+blobs": "6d64ca90",
+    "magers+rangers": "3d14a977",
+    "nopillar/nibblers": "531ee47d",
+    "nopillar/blobs": "b58b2cb0",
+    "full/center/shortcap": "f8000655"
+  }
+}

@@ -435,9 +435,14 @@ const LOADOUTS = {
 function chebyshev(x1,y1,x2,y2){return Math.max(Math.abs(x2-x1),Math.abs(y2-y1))}
 function collisionMath(x,y,s,x2,y2,s2){return !(x>x2+s2-1||x+s-1<x2||y-s+1>y2||y<y2-s2+1)}
 function closestTileTo(mob,tx,ty){return{x:Math.max(mob.x,Math.min(mob.x+mob.size-1,tx)),y:Math.max(mob.y-mob.size+1,Math.min(mob.y,ty))}}
-function distToMob(px,py,mob){let ct=closestTileTo(mob,px,py);return chebyshev(px,py,ct.x,ct.y)}
-function collidesWithEntities(x,y,s,entities){for(let e of entities){if(collisionMath(x,y,s,e.x,e.y,e.size))return true}return false}
-function collidesWithMobs(x,y,s,mobs,exclude,skipNibblers){for(let m of mobs){if(m===exclude||m.dead)continue;if(exclude&&exclude.parentBlobId===m.id&&m.dying>0)continue;if(skipNibblers&&m.type==='nibbler')continue;if(collisionMath(x,y,s,m.x,m.y,m.size))return m}return null}
+function distToMob(px,py,mob){
+  let cx=px<mob.x?mob.x:px,mx=mob.x+mob.size-1;if(cx>mx)cx=mx;
+  let my=mob.y-mob.size+1,cy=py>mob.y?mob.y:py;if(cy<my)cy=my;
+  let dx=px-cx;if(dx<0)dx=-dx;let dy=py-cy;if(dy<0)dy=-dy;
+  return dx>dy?dx:dy;
+}
+function collidesWithEntities(x,y,s,entities){for(let i=0;i<entities.length;i++){let e=entities[i];if(collisionMath(x,y,s,e.x,e.y,e.size))return true}return false}
+function collidesWithMobs(x,y,s,mobs,exclude,skipNibblers){for(let i=0;i<mobs.length;i++){let m=mobs[i];if(m===exclude||m.dead)continue;if(exclude&&exclude.parentBlobId===m.id&&m.dying>0)continue;if(skipNibblers&&m.type==='nibbler')continue;if(collisionMath(x,y,s,m.x,m.y,m.size))return m}return null}
 function rangedDelay(dist){if(dist<=4)return 2;if(dist<=8)return 3;if(dist<=11)return 4;return 5}
 function magicDelay(dist){if(dist<=6)return 2;if(dist<=10)return 3;if(dist<=14)return 4;return 5}
 function magerDelay(dist){if(dist<=5)return 2;if(dist<=9)return 3;if(dist<=13)return 4;return 5}
@@ -462,7 +467,13 @@ function monsterProjectileOrigin(mob){
   if(mob.type==='ranger'||mob.type==='blob')return{x:mob.x+1,y:mob.y-1}; // center tile of 3x3
   return{x:mob.x,y:mob.y};
 }
-function monsterProjectileDistance(px,py,mob){let o=monsterProjectileOrigin(mob);return chebyshev(px,py,o.x,o.y)}
+function monsterProjectileDistance(px,py,mob){
+  let ox=mob.x,oy=mob.y,ty=mob.type;
+  if(ty==='mager'){ox+=2;oy-=2}
+  else if(ty==='ranger'||ty==='blob'){ox+=1;oy-=1}
+  let dx=px-ox;if(dx<0)dx=-dx;let dy=py-oy;if(dy<0)dy=-dy;
+  return dx>dy?dx:dy;
+}
 function monsterProjectileDelay(mob,style,player){
   if(style==='melee')return 1;
   let originDist=monsterProjectileDistance(player.x,player.y,mob);
@@ -503,13 +514,41 @@ function raycast(region,x1,y1,x2,y2){
   else{let yInc=dy>0?1:-1,slope=Math.trunc((dx<<16)/dyAbs),x=(x1<<16)+0x8000;if(dx<0)x-=1;let yTile=y1;while(yTile!==y2){yTile+=yInc;let xTile=x>>>16;if(bl[(xTile<<6)|yTile])return false;x+=slope;let nx=x>>>16;if(nx!==xTile&&bl[(nx<<6)|yTile])return false}}
   return true;
 }
-function mobHasLOS(region,mob,target){return mob.range===1?isWithinMeleeRange(mob,target):hasLineOfSight(region,mob.x,mob.y,target.x,target.y,mob.size,mob.range,true)}
-function playerHasLOS(region,px,py,mob,range){let cp=closestTileTo(mob,px,py);return hasLineOfSight(region,px,py,cp.x,cp.y,1,range,false)}
+// LOS is a pure function of positions, footprint and the blocked grid. Each
+// query checks the per-mob memo first and then a region-wide map shared across
+// sims. Keys pack positions, size, range and direction into a small integer.
+// Both caches are invalidated when a pillar leaves the blocked grid.
+function mobHasLOS(region,mob,target){
+  if(mob.range===1)return isWithinMeleeRange(mob,target);
+  let bv=region.blockedVersion|0;
+  let key=(mob.x<<18)|(mob.y<<12)|(target.x<<6)|target.y;
+  if(mob._losKey===key&&mob._losBV===bv)return mob._losVal;
+  let lc=region.losCache,v;
+  if(lc!==undefined){
+    let rk=((((mob.size-1)<<4)|mob.range)<<1|1)*16777216+key;
+    v=lc.get(rk);
+    if(v===undefined){v=hasLineOfSight(region,mob.x,mob.y,target.x,target.y,mob.size,mob.range,true);lc.set(rk,v)}
+  }else v=hasLineOfSight(region,mob.x,mob.y,target.x,target.y,mob.size,mob.range,true);
+  mob._losKey=key;mob._losBV=bv;mob._losVal=v;
+  return v;
+}
+function playerHasLOS(region,px,py,mob,range){
+  let bv=region.blockedVersion|0;
+  let key=(px<<18)|(py<<12)|(mob.x<<6)|mob.y;
+  if(mob._plosKey===key&&mob._plosBV===bv)return mob._plosVal;
+  let lc=region.losCache,v;
+  if(lc!==undefined){
+    let rk=((((mob.size-1)<<4)|range)<<1)*16777216+key;
+    v=lc.get(rk);
+    if(v===undefined){let cp=closestTileTo(mob,px,py);v=hasLineOfSight(region,px,py,cp.x,cp.y,1,range,false);lc.set(rk,v)}
+  }else{let cp=closestTileTo(mob,px,py);v=hasLineOfSight(region,px,py,cp.x,cp.y,1,range,false)}
+  mob._plosKey=key;mob._plosBV=bv;mob._plosVal=v;
+  return v;
+}
 function isWithinMeleeRange(mob,target){let dx=target.x-mob.x,dy=target.y-mob.y,s=mob.size;return(dx<s&&dx>=0&&(dy===1||dy===-s))||(dy>-s&&dy<=0&&(dx===-1||dx===s))}
 function isWithinSecondaryMeleeRange(mob,target){
   // Ranger/mager/blob secondary melee can hit 1 tile from their footprint in any direction, including diagonals.
-  let ct=closestTileTo(mob,target.x,target.y);
-  return chebyshev(target.x,target.y,ct.x,ct.y)===1;
+  return distToMob(target.x,target.y,mob)===1;
 }
 function canUseSecondaryMelee(mob,player){
   return (mob.type==='mager'||mob.type==='ranger'||mob.type==='blob')&&isWithinSecondaryMeleeRange(mob,player);
@@ -572,6 +611,7 @@ function osrsWalkStep(sx,sy,tx,ty,region){
 
 const DEATH_ANIM_TICKS=3;
 const PILLAR_MAX_HP=255;
+const AOE_OFFSETS=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
 
 function pillarHpFromPercent(percent){
   percent=Number(percent)||0;
@@ -597,12 +637,14 @@ function createRegion(pillarConfig,pillarPercents){
   let blocked=new Uint8Array(4096); // 64×64 grid, index = (x<<6)|y
   for(let e of entities){let ex1=e.x+e.size-1,ey0=e.y-e.size+1;
     for(let ex=e.x;ex<=ex1;ex++)for(let ey=ey0;ey<=e.y;ey++)blocked[(ex<<6)|ey]=1}
-  return{entities,pillars:p2,blocked};
+  return{entities,pillars:p2,blocked,blockedVersion:0,losCache:new Map()};
 }
 
 function removePillarCollision(region,pillar){
   region.entities=region.entities.filter(entity=>entity!==pillar);
   for(let x=pillar.x;x<pillar.x+pillar.size;x++)for(let y=pillar.y-pillar.size+1;y<=pillar.y;y++)region.blocked[(x<<6)|y]=0;
+  region.blockedVersion=(region.blockedVersion|0)+1;
+  if(region.losCache!==undefined)region.losCache.clear();
   pillar.dead=true;pillar.collapsing=false;
 }
 function swTileAdjacentToPillar(entity,pillar){
@@ -673,6 +715,15 @@ function parseSpawnCode(code){
   return{spawns,hasIndexInfo:hasExplicit,hasPillarHp,pillarHp,baseCode,sanitizedCode:hasPillarHp?baseCode+suffix:baseCode,invalidPillarSuffix};
 }
 
+// A one-entry memo. parseSpawnCode is pure and engine callers never mutate the result.
+let _parseCache=null;
+function cachedParseSpawnCode(code){
+  if(_parseCache!==null&&_parseCache.code===code)return _parseCache.parsed;
+  let parsed=parseSpawnCode(code);
+  _parseCache={code,parsed};
+  return parsed;
+}
+
 function findRespawnLocation(size,region,mobs){for(let x=16;x<23;x++)for(let y=11;y<24;y++)if(!collidesWithMobs(x,y,size,mobs,null)&&!collidesWithEntities(x,y,size,region.entities))return{x,y};return{x:11,y:9}}
 
 // ===== SEEDED PRNG =====
@@ -695,7 +746,12 @@ function hlCreateMob(type,x,y,id){
   return{id,type,x,y,size:d.size,hp:d.hp,maxHp:d.hp,atkSpeed:d.atkSpeed,range:d.range,style:d.style,
     attackDelay:0,stunned:0,frozen:0,dead:false,dying:-1,dyingStartTick:-1,corpseRemovalTick:undefined,revivedOnce:false,hasLOS:false,hadLOS:false,
     isBlob:d.isBlob||false,blobScanPrayer:null,hasDig:d.hasDig||false,digTimer:0,digLocation:null,
-    hasFlicker:d.hasFlicker||false,flickering:false,incomingProjectiles:[],noLOSTicks:0,currentStyle:null};
+    hasFlicker:d.hasFlicker||false,flickering:false,incomingProjectiles:[],noLOSTicks:0,currentStyle:null,
+    // Pre-declared so every mob shares one hidden class. These are assigned later.
+    infNum:undefined,aggroTarget:undefined,parentBlobId:undefined,pendingRemovalTick:undefined,_lastScanTick:undefined,
+    // LOS memo slots for both directions. A key of -1 never matches a real position.
+    _losKey:-1,_losBV:-1,_losVal:false,
+    _plosKey:-1,_plosBV:-1,_plosVal:false};
 }
 function hlCreatePlayer(x,y,loadout){
   let startHp=loadoutStartingHp(loadout),maxHp=Math.max(startHp,loadoutBloodMaxHp(loadout));
@@ -706,10 +762,12 @@ function hlCreatePlayer(x,y,loadout){
 function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed){
   let idCounter=0;
   let rng = (seed===undefined||seed===null) ? Math.random : mulberry32(seed);
-  let parsed=parseSpawnCode(spawnCode);if(parsed.error)return null;
+  let parsed=cachedParseSpawnCode(spawnCode);if(parsed.error)return null;
   let dynamicPillars=parsed.hasPillarHp;
   let resolvedPillars=effectivePillarConfig(parsed,pillarConfig);
   let region=dynamicPillars?createRegion(resolvedPillars,pillarPercentConfig(parsed)):(cachedRegion||createRegion(resolvedPillars));
+  // Dynamic pillar regions live for a single sim, so the cross-sim LOS cache could never hit.
+  if(dynamicPillars)region.losCache=undefined;
   let initialEnemyCount=parsed.spawns.reduce((count,spawn)=>count+(spawn.type==='nothing'?0:1),0);
   let mobs=[],player=hlCreatePlayer(playerPos.x,playerPos.y,loadout),deadMobs=[];
   for(let spawn of parsed.spawns){if(spawn.type==='nothing')continue;let m=hlCreateMob(spawn.type,spawn.x,spawn.y,idCounter++);m.infNum=spawn.infNum||0;mobs.push(m)}
@@ -723,29 +781,42 @@ function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed)
   let mobInitHP={};
   let mobMap=new Map();
   for(let m of mobs){mobInitHP[m.id]={hp:m.hp,type:m.type};mobMap.set(m.id,m)}
-  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng};
+  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng,deadCount:0,dyingCount:0,pendingRemovalCount:0,mobEpoch:0,_cleanupEpoch:-1,_cleanupVal:null};
 }
-function hlMarkMobForProjectileRemoval(mob,tick){
+// One shared shape for every attack log record keeps the damage loops
+// monomorphic. Unset fields read exactly as absent fields would.
+function mkAttackRecord(tick){
+  return{tick,mobId:undefined,mobType:undefined,style:undefined,isScan:false,scanTick:undefined,
+    accRoll:undefined,dmgRoll:undefined,distAtFire:undefined,hitTick:undefined,
+    isPlayerAttack:false,playerDmg:undefined,targetMobId:undefined,targetMobType:undefined,
+    isRevive:false,reviveHp:undefined,
+    isPillarCollapsePlayerDamage:false,isPillarCollapseMobDamage:false,pillarId:undefined,damage:undefined,killsNibbler:false};
+}
+function hlMarkMobForProjectileRemoval(mob,tick,S){
   if(mob.dead)return;
   mob.hp=0;
   if(mob.pendingRemovalTick===undefined||mob.pendingRemovalTick>tick+1){
+    if(mob.pendingRemovalTick===undefined)S.pendingRemovalCount++;
     mob.pendingRemovalTick=tick+1;
     mob.dyingStartTick=tick;
   }
 }
 function hlProcessCorpseExpiry(S,tick){
-  for(let mob of S.mobs){
+  if(S.dyingCount===0)return;
+  for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying<=0)continue;
     let remain=(mob.corpseRemovalTick??tick)-tick;
-    if(remain<=0){mob.dead=true;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
+    if(remain<=0){mob.dead=true;S.deadCount++;S.dyingCount--;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
     else mob.dying=remain;
   }
 }
 function hlProcessPendingMobDeaths(S,tick){
+  if(S.pendingRemovalCount===0)return;
   let player=S.player;
-  for(let mob of S.mobs){
+  for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying>0)continue;
     if(mob.pendingRemovalTick!==undefined&&mob.pendingRemovalTick<=tick){
+      S.mobEpoch++;S.pendingRemovalCount--;S.dyingCount++;
       mob.pendingRemovalTick=undefined;
       mob.dying=DEATH_ANIM_TICKS;
       mob.corpseRemovalTick=tick+DEATH_ANIM_TICKS;
@@ -758,7 +829,7 @@ function hlDamagePillar(pillar,damage,tick,S){
   pillar.hp=Math.max(0,pillar.hp-damage);
   if(pillar.hp>0)return;
   let hitPlayer=beginPillarCollapse(pillar,tick,S.mobs,S.player);
-  if(hitPlayer)S.attacks.push({tick,isPillarCollapsePlayerDamage:true,pillarId:pillar.id});
+  if(hitPlayer){let a=mkAttackRecord(tick);a.isPillarCollapsePlayerDamage=true;a.pillarId=pillar.id;S.attacks.push(a)}
 }
 function hlProcessPillarTransitions(S,tick){
   if(!S.dynamicPillars)return;
@@ -768,7 +839,7 @@ function hlProcessPillarTransitions(S,tick){
       let mob=S.mobMap.get(mobId);
       if(!mob||mob.dead||mob.dying>0||mob.hp<=0)continue;
       let damage=mob.type==='nibbler'?mob.hp:Math.floor(mob.hp/2);
-      if(damage>0){mob.hp-=damage;S.attacks.push({tick,isPillarCollapseMobDamage:true,pillarId:pillar.id,mobId:mob.id,damage,killsNibbler:mob.type==='nibbler'});if(mob.hp<=0)hlMarkMobForProjectileRemoval(mob,tick-1)}
+      if(damage>0){mob.hp-=damage;let a=mkAttackRecord(tick);a.isPillarCollapseMobDamage=true;a.pillarId=pillar.id;a.mobId=mob.id;a.damage=damage;a.killsNibbler=mob.type==='nibbler';S.attacks.push(a);if(mob.hp<=0)hlMarkMobForProjectileRemoval(mob,tick-1,S)}
     }
     removePillarCollision(S.region,pillar);
   }
@@ -780,15 +851,17 @@ function hlTick(S){
   hlProcessCorpseExpiry(S,t);
   hlProcessPendingMobDeaths(S,t);
   hlProcessDelayedBlobletSpawns(S,t);
-  // Move mobs
-  for(let mob of mobs){if(mob.dead||mob.dying>0)continue;if(mob.stunned>0){mob.stunned--;continue}if(mob.frozen>0){mob.frozen--;continue}hlMoveMob(mob,player,region,mobs,S)}
+  // Move mobs. The length is re-read every iteration on purpose because mobs
+  // pushed mid-loop must still be visited.
+  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0)continue;if(mob.stunned>0){mob.stunned--;continue}if(mob.frozen>0){mob.frozen--;continue}hlMoveMob(mob,player,region,mobs,S)}
   // Mob attacks (must happen before player projectile processing so lastAttacker is current)
-  for(let mob of mobs){if(mob.dead||mob.dying>0||mob.stunned>0)continue;mob.attackDelay--;hlMobAttack(mob,player,region,mobs,t,S)}
+  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0||mob.stunned>0)continue;mob.attackDelay--;hlMobAttack(mob,player,region,mobs,t,S)}
   // Player projectiles land after NPC actions for this tick. Fatal hits remove on T+1.
-  for(let mob of mobs){if(mob.dead||mob.dying>0)continue;let rem=[];for(let p of mob.incomingProjectiles){p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){hlMarkMobForProjectileRemoval(mob,t)}}}else rem.push(p)}mob.incomingProjectiles=rem}
+  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0)continue;let arr=mob.incomingProjectiles;if(arr.length===0)continue;let w=0;for(let k=0;k<arr.length;k++){let p=arr[k];p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){hlMarkMobForProjectileRemoval(mob,t,S)}}}else arr[w++]=p}arr.length=w}
   // Process player incoming projectiles (auto-retaliate)
-  {let rem=[],arrived=[];for(let p of player.incomingProjectiles){p.delay--;if(p.delay<=0){arrived.push(p)}else rem.push(p)}
-    if(player.autoRetaliate&&arrived.length>0){
+  {let parr=player.incomingProjectiles,arrivedCount=0;
+    if(parr.length){let w=0;for(let k=0;k<parr.length;k++){let p=parr[k];p.delay--;if(p.delay<=0)arrivedCount++;else parr[w++]=p}parr.length=w}
+    if(player.autoRetaliate&&arrivedCount>0){
       if(!player.aggro||player.aggro.dead||(player.aggro.dying>0&&t>player.aggro.dyingStartTick)){
         // Target lastAttacker (set when mob fires, not when projectile lands)
         let target=player.lastAttacker;
@@ -796,7 +869,7 @@ function hlTick(S){
           player.aggro=target;let fd=Math.floor(loadout.atkSpeed/2)+1;if(player.attackDelay<fd)player.attackDelay=fd}
       }
     }
-    player.incomingProjectiles=rem}
+  }
   // Player attack
   player.attackDelay--;
   // Player movement — running (2 steps/tick), face tile destination
@@ -827,15 +900,15 @@ function hlTick(S){
     target.incomingProjectiles.push({delay,damage:dmg});
     // Record player attack event for post HP calculation. Damage is rolled now,
     // but mob HP/death is applied when the projectile lands.
-    S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:dmg,targetMobId:target.id,targetMobType:target.type,hitTick:t+delay});
+    {let a=mkAttackRecord(t);a.isPlayerAttack=true;a.playerDmg=dmg;a.targetMobId=target.id;a.targetMobType=target.type;a.hitTick=t+delay;S.attacks.push(a)}
     // Blood barrage: 3x3 AOE around target's SW tile
     if(loadout.isBloodBarrage){
-      let aoeOffsets=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
       let hitCount=1; // primary target already hit
-      for(let off of aoeOffsets){
+      for(let oi=0;oi<AOE_OFFSETS.length;oi++){
+        let off=AOE_OFFSETS[oi];
         if(hitCount>=9)break;
         let ax=target.x+off[0],ay=target.y+off[1];
-        for(let m of mobs){
+        for(let mi=0;mi<mobs.length;mi++){let m=mobs[mi];
           if(m.dead||m.dying>0||m.pendingRemovalTick!==undefined||m===target)continue;
           // Check if mob's SW tile matches AOE offset position
           if(m.x===ax&&m.y===ay){
@@ -846,7 +919,7 @@ function hlTick(S){
             let sDmg=sHit?Math.floor(S.rng()*(loadout.maxHit+1)):0;
             let sDelay=playerProjectileDelay(loadout,player.x,player.y,m);
             m.incomingProjectiles.push({delay:sDelay,damage:sDmg});
-            S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:sDmg,targetMobId:m.id,targetMobType:m.type,hitTick:t+sDelay});
+            {let a=mkAttackRecord(t);a.isPlayerAttack=true;a.playerDmg=sDmg;a.targetMobId=m.id;a.targetMobType=m.type;a.hitTick=t+sDelay;S.attacks.push(a)}
             break; // one mob per offset tile
           }
         }
@@ -886,10 +959,22 @@ function hlCanMove(mob,xOff,yOff,region,mobs){
   if(xOff===0&&yOff===0)return true;
   let s=mob.size,dx=xOff,dy=-yOff;
   let nx=mob.x+dx,ny=mob.y+dy,bl=region.blocked,isNib=mob.type==='nibbler';
-  if(dx===-1)for(let i=0;i<s;i++){if(bl[(nx<<6)|(ny-i)])return false;if(!isNib&&collidesWithMobs(nx,ny-i,1,mobs,mob,true))return false}
-  else if(dx===1){let rx=nx+s-1;for(let i=0;i<s;i++){if(bl[(rx<<6)|(ny-i)])return false;if(!isNib&&collidesWithMobs(rx,ny-i,1,mobs,mob,true))return false}}
-  if(dy===1)for(let i=0;i<s;i++){if(bl[((nx+i)<<6)|ny])return false;if(!isNib&&collidesWithMobs(nx+i,ny,1,mobs,mob,true))return false}
-  else if(dy===-1){let by=ny-s+1;for(let i=0;i<s;i++){if(bl[((nx+i)<<6)|by])return false;if(!isNib&&collidesWithMobs(nx+i,by,1,mobs,mob,true))return false}}
+  // A single pass over the mob list tests the moved edge strips as rectangles.
+  // An unset strip keeps x1 below x0 so it can never match.
+  let ax0=0,ax1=-1,ay0=0,ay1=-1,bx0=0,bx1=-1,by0=0,by1=-1;
+  if(dx===-1){for(let i=0;i<s;i++)if(bl[(nx<<6)|(ny-i)])return false;ax0=nx;ax1=nx;ay0=ny-s+1;ay1=ny}
+  else if(dx===1){let rx=nx+s-1;for(let i=0;i<s;i++)if(bl[(rx<<6)|(ny-i)])return false;ax0=rx;ax1=rx;ay0=ny-s+1;ay1=ny}
+  if(dy===1){for(let i=0;i<s;i++)if(bl[((nx+i)<<6)|ny])return false;bx0=nx;bx1=nx+s-1;by0=ny;by1=ny}
+  else if(dy===-1){let ey=ny-s+1;for(let i=0;i<s;i++)if(bl[((nx+i)<<6)|ey])return false;bx0=nx;bx1=nx+s-1;by0=ey;by1=ey}
+  if(isNib)return true;
+  for(let i=0;i<mobs.length;i++){let m=mobs[i];
+    if(m===mob||m.dead)continue;
+    if(mob.parentBlobId===m.id&&m.dying>0)continue;
+    if(m.type==='nibbler')continue;
+    let mx1=m.x+m.size-1,my0=m.y-m.size+1;
+    if(ax1>=ax0&&ax0<=mx1&&ax1>=m.x&&ay0<=m.y&&ay1>=my0)return false;
+    if(bx1>=bx0&&bx0<=mx1&&bx1>=m.x&&by0<=m.y&&by1>=my0)return false;
+  }
   return true;
 }
 function hlMobAttack(mob,player,region,mobs,tick,S){
@@ -901,15 +986,15 @@ function hlMobAttack(mob,player,region,mobs,tick,S){
   }
   mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
   if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
-    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
+    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();S.mobEpoch++;toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;if(toRes.dead)S.deadCount--;if(toRes.dying>0)S.dyingCount--;if(toRes.pendingRemovalTick!==undefined)S.pendingRemovalCount--;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
       let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;if(!mobs.includes(toRes))mobs.push(toRes);
-      S.attacks.push({tick,mobId:toRes.id,mobType:toRes.type,isRevive:true,reviveHp});
+      {let a=mkAttackRecord(tick);a.mobId=toRes.id;a.mobType=toRes.type;a.isRevive=true;a.reviveHp=reviveHp;S.attacks.push(a)}
       mob.attackDelay=mob.atkSpeed*2;return}
     hlFireAttack(mob,player,tick,S);mob.attackDelay=mob.atkSpeed;return}
   if(mob.isBlob){if(!mob.hasLOS&&!mob.blobScanPrayer)return;
     if(mob.hasLOS&&(!mob.hadLOS||(!mob.blobScanPrayer&&mob.attackDelay<=0))){mob.blobScanPrayer='scanned';mob.attackDelay=mob.atkSpeed;mob._lastScanTick=tick;
       mob.currentStyle=S.rng()<0.5?'magic':'range';
-      S.attacks.push({tick,mobId:mob.id,mobType:'blob',style:null,isScan:true,scanTick:tick,accRoll:0,dmgRoll:0});return}
+      {let a=mkAttackRecord(tick);a.mobId=mob.id;a.mobType='blob';a.style=null;a.isScan=true;a.scanTick=tick;a.accRoll=0;a.dmgRoll=0;S.attacks.push(a)}return}
     if(mob.blobScanPrayer&&mob.attackDelay<=0){hlFireAttack(mob,player,tick,S,'blob_attack',mob._lastScanTick||tick-3);mob.blobScanPrayer=null;mob.attackDelay=mob.atkSpeed}return}
   if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
   let actualStyle=mob.style;
@@ -922,19 +1007,20 @@ function hlFireAttack(mob,player,tick,S,styleOrBlobFlag,scanTick){
   // Calculate projectile delay for auto-retaliate timing. Blob damage style remains
   // prayer-resolved post-hoc unless the blob rolls its secondary melee here.
   let projectileStyle=isBlob?(mob.currentStyle||'magic'):style;
-  if(canUseSecondaryMelee(mob,player)&&S.rng()<0.5){projectileStyle='melee';style='melee';isBlob=false}
-  let delay=monsterProjectileDelay(mob,projectileStyle,player);
+  // edgeDist doubles as the secondary melee adjacency test, so it is computed once
   let edgeDist=distToMob(player.x,player.y,mob);
+  if((mob.type==='mager'||mob.type==='ranger'||mob.type==='blob')&&edgeDist===1&&S.rng()<0.5){projectileStyle='melee';style='melee';isBlob=false}
+  let delay=monsterProjectileDelay(mob,projectileStyle,player);
   player.incomingProjectiles.push({delay:delay+1,damage:0,mobType:mob.type,mobId:mob.id,style:projectileStyle});
   // last_attacker is set when mob fires, not when projectile lands
   setPlayerLastAttacker(player,mob);
   // Record attack event for prayer analysis
-  S.attacks.push({tick,mobId:mob.id,mobType:mob.type,style:isBlob?null:style,isScan:false,
-    scanTick:isBlob?(scanTick||tick-3):-1,
-    accRoll:S.rng(),dmgRoll:S.rng(),distAtFire:edgeDist,hitTick:tick+delay});
+  {let a=mkAttackRecord(tick);a.mobId=mob.id;a.mobType=mob.type;a.style=isBlob?null:style;
+    a.scanTick=isBlob?(scanTick||tick-3):-1;
+    a.accRoll=S.rng();a.dmgRoll=S.rng();a.distAtFire=edgeDist;a.hitTick=tick+delay;S.attacks.push(a)}
 }
 function hlSpawnBlobletsFromBlob(blob,tick,S){
-  let mobs=S.mobs;
+  let mobs=S.mobs;S.mobEpoch++;
   let bm=hlCreateMob('blobletMage',blob.x+2,blob.y-2,S.idCounter++);bm.stunned=0;bm.frozen=1;bm.attackDelay=4;bm.parentBlobId=blob.id;mobs.push(bm);
   let br=hlCreateMob('blobletRange',blob.x+1,blob.y-1,S.idCounter++);br.stunned=0;br.frozen=1;br.attackDelay=4;br.parentBlobId=blob.id;mobs.push(br);
   let bx=hlCreateMob('blobletMelee',blob.x,blob.y,S.idCounter++);bx.stunned=0;bx.frozen=1;bx.attackDelay=4;bx.parentBlobId=blob.id;mobs.push(bx);
@@ -966,12 +1052,21 @@ function hlOnDeath(mob,player,region,mobs,tick,S){
 
 function hlRequiresFullClear(S){return (S.initialEnemyCount||0)<=3}
 function hlCleanupStopReason(S){
+  // The inputs change only at death, spawn and revive events, which all bump
+  // S.mobEpoch. The undefined check keeps hand-built states without the epoch
+  // fields uncached.
+  if(S._cleanupEpoch!==undefined&&S._cleanupEpoch===S.mobEpoch)return S._cleanupVal;
+  S._cleanupEpoch=S.mobEpoch;
+  return S._cleanupVal=hlCleanupStopReasonUncached(S);
+}
+function hlCleanupStopReasonUncached(S){
   if(hlRequiresFullClear(S))return null;
   if((S.delayedBlobletSpawns||[]).length>0)return null;
-  let active=S.mobs.filter(m=>!m.dead&&m.dying<=0);
-  if(active.length===0)return null;
-  if(active.every(m=>m.type.startsWith('bloblet')))return 'bloblets';
-  if((S.initialEnemyCount||0)>=4&&active.length===1)return 'last-enemy';
+  let active=0,allBloblets=true;
+  for(let i=0;i<S.mobs.length;i++){let m=S.mobs[i];if(m.dead||m.dying>0)continue;active++;if(!m.type.startsWith('bloblet'))allBloblets=false}
+  if(active===0)return null;
+  if(allBloblets)return 'bloblets';
+  if((S.initialEnemyCount||0)>=4&&active===1)return 'last-enemy';
   return null;
 }
 function hlTrappedResultStatus(S,trappedBig){return !hlRequiresFullClear(S)&&checkTrappedValid(trappedBig)?'trapped':'invalid'}
@@ -982,16 +1077,18 @@ function hlRunSim(spawnCode,playerPos,pillarConfig,loadout,maxTicks,cachedRegion
   let S=hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed);if(!S)return null;
   for(let i=0;i<maxTicks;i++){
     hlTick(S);
-    // Check wave complete — count dead mobs only when something changed
-    let deadCount=0;for(let j=0;j<S.mobs.length;j++)if(S.mobs[j].dead)deadCount++;
+    // Check wave complete. S.deadCount tracks the dead flag transitions.
+    let deadCount=S.deadCount;
     if(deadCount===S.mobs.length)return{attacks:S.attacks,completedTick:S.tick,mobs:S.mobs,status:'complete',mobInitHP:S.mobInitHP};
     let cleanupReason=hlCleanupStopReason(S);
     if(cleanupReason)return{attacks:S.attacks,completedTick:S.tick,mobs:S.mobs,status:'cleanup',cleanupReason,mobInitHP:S.mobInitHP};
     // Check trapped
     if(!S.player.aggro&&!hlHasActivePillarThreat(S)){
-      let allNoLOS=true,trappedBig=[],activeCount=0;
-      for(let j=0;j<S.mobs.length;j++){let m=S.mobs[j];if(m.dead||m.dying>0||m.hp<=0)continue;activeCount++;if(m.noLOSTicks<20){allNoLOS=false;break}if(m.type!=='nibbler'&&!m.type.startsWith('bloblet'))trappedBig.push(m)}
+      let allNoLOS=true,activeCount=0;
+      for(let j=0;j<S.mobs.length;j++){let m=S.mobs[j];if(m.dead||m.dying>0||m.hp<=0)continue;activeCount++;if(m.noLOSTicks<20){allNoLOS=false;break}}
       if(allNoLOS&&activeCount>0&&deadCount<S.mobs.length){
+        let trappedBig=[];
+        for(let j=0;j<S.mobs.length;j++){let m=S.mobs[j];if(m.dead||m.dying>0||m.hp<=0)continue;if(m.type!=='nibbler'&&!m.type.startsWith('bloblet'))trappedBig.push(m)}
         return{attacks:S.attacks,completedTick:S.tick,mobs:S.mobs,status:hlTrappedResultStatus(S,trappedBig),mobInitHP:S.mobInitHP};
       }
     }
@@ -1039,7 +1136,7 @@ function checkTileExcluded(x,y,mobs,region){
 // =====================================================
 function optimizePrayer(allSimResults,spawnCode,pillarConfig,loadout){
   // Determine which big3 types exist
-  let parsed=parseSpawnCode(spawnCode);
+  let parsed=cachedParseSpawnCode(spawnCode);
   let mobTypes=new Set();
   for(let s of parsed.spawns)if(s.type!=='nothing')mobTypes.add(s.type);
   let hasMager=mobTypes.has('mager'),hasRanger=mobTypes.has('ranger'),hasMeleer=mobTypes.has('meleer');
@@ -1048,15 +1145,16 @@ function optimizePrayer(allSimResults,spawnCode,pillarConfig,loadout){
   let slots=[null,null,null,null]; // slots[i] = prayer type or null (unknown)
   // Look at first attacks from big3 across all sims to find consistent slot
   let slotVotes={mager:{},ranger:{},meleer:{}};
+  // Only the first attack per big three type per sim votes. The scan stops
+  // once every present type has voted.
   for(let result of allSimResults){
-    for(let atk of result.attacks){
+    let atks=result.attacks,fM=!hasMager,fR=!hasRanger,fX=!hasMeleer;
+    for(let i=0;i<atks.length&&!(fM&&fR&&fX);i++){let atk=atks[i];
       if(atk.isScan)continue;
-      if(atk.mobType==='mager'&&hasMager&&!slotVotes.mager.found){slotVotes.mager[atk.tick%4]=(slotVotes.mager[atk.tick%4]||0)+1;slotVotes.mager.found=true}
-      if(atk.mobType==='ranger'&&hasRanger&&!slotVotes.ranger.found){slotVotes.ranger[atk.tick%4]=(slotVotes.ranger[atk.tick%4]||0)+1;slotVotes.ranger.found=true}
-      if(atk.mobType==='meleer'&&hasMeleer&&!slotVotes.meleer.found){slotVotes.meleer[atk.tick%4]=(slotVotes.meleer[atk.tick%4]||0)+1;slotVotes.meleer.found=true}
+      if(!fM&&atk.mobType==='mager'){slotVotes.mager[atk.tick%4]=(slotVotes.mager[atk.tick%4]||0)+1;fM=true}
+      if(!fR&&atk.mobType==='ranger'){slotVotes.ranger[atk.tick%4]=(slotVotes.ranger[atk.tick%4]||0)+1;fR=true}
+      if(!fX&&atk.mobType==='meleer'){slotVotes.meleer[atk.tick%4]=(slotVotes.meleer[atk.tick%4]||0)+1;fX=true}
     }
-    // Reset found for next sim
-    delete slotVotes.mager.found;delete slotVotes.ranger.found;delete slotVotes.meleer.found;
   }
   // Assign slots for big3
   function getBestSlot(votes){let best=-1,bestCount=0;for(let s=0;s<4;s++){let c=votes[s]||0;if(c>bestCount){bestCount=c;best=s}}return best}
@@ -1118,7 +1216,65 @@ function loadoutBloodHealRate(loadout){return loadoutHasBloodSceptre(loadout)?0.
 function loadoutBloodMaxHp(loadout){return loadoutHasBloodSceptre(loadout)?108:99}
 function loadoutStartingHp(loadout){let hp=Number(loadout?.startingHp??99);if(!Number.isFinite(hp))hp=99;return Math.max(1,Math.min(115,Math.round(hp)))}
 
+// Fast path for loadouts without recoil tracking. Only prayer blocking and
+// damage accumulation remain, and the result must stay identical to
+// calcSimDamage with hasRecoil=false. Per-attack constants are fixed once a
+// rollout exists, so they are precomputed into a flat table cached on the
+// attacks array. Each entry spans five slots:
+//   [0] kind: 0 monster attack, 1 blob whose style resolves from the scan
+//       tick prayer, 2 pillar collapse player damage
+//   [1] the attack tick modulo 4
+//   [2] style code for kind 0 (0 magic, 1 range, 2 melee) or the scan tick
+//       modulo 4 for kind 1
+//   [3] damage if unblocked, rolled as range for kind 1
+//   [4] damage rolled as magic, used by kind 1 only
+function buildNoRecoilTable(attacks,loadout){
+  let monsterAtk=loadout.monsterAtk,t=[];
+  for(let i=0;i<attacks.length;i++){let atk=attacks[i];
+    if(atk.isScan||atk.isPlayerAttack||atk.isRevive||atk.isPillarCollapseMobDamage)continue;
+    if(atk.isPillarCollapsePlayerDamage){t.push(2,0,0,0,0);continue}
+    let stats=monsterAtk[atk.mobType];
+    if(!stats)continue; // such an attack contributes nothing whether blocked or not
+    if(atk.style===null){
+      let dR=atk.accRoll<stats.range.acc?Math.floor(atk.dmgRoll*(stats.range.max+1)):0;
+      let dM=atk.accRoll<stats.mage.acc?Math.floor(atk.dmgRoll*(stats.mage.max+1)):0;
+      t.push(1,atk.tick%4,atk.scanTick%4,dR,dM);continue;
+    }
+    let st=atk.style,sc=st==='magic'?0:st==='range'?1:2;
+    if(st==='melee'&&stats.melee)stats=stats.melee;
+    else if(atk.mobType==='blob')stats=st==='magic'?stats.mage:stats.range;
+    let d=atk.accRoll<stats.acc?Math.floor(atk.dmgRoll*(stats.max+1)):0;
+    t.push(0,atk.tick%4,sc,d,0);
+  }
+  return t;
+}
+function prayerCode(p){return p==='mage'?0:p==='range'?1:p==='melee'?2:-1}
+function calcSimDamageNoRecoil(attacks,prayerSeq,loadout){
+  let t=attacks._nrTable;
+  if(t===undefined||attacks._nrLoadout!==loadout){t=buildNoRecoilTable(attacks,loadout);attacks._nrTable=t;attacks._nrLoadout=loadout}
+  let startHp=loadoutStartingHp(loadout),hp=startHp,died=false;
+  let pc0=prayerCode(prayerSeq[0]),pc1=prayerCode(prayerSeq[1]),pc2=prayerCode(prayerSeq[2]),pc3=prayerCode(prayerSeq[3]);
+  for(let i=0;i<t.length;i+=5){
+    let kind=t[i];
+    if(kind===2){hp-=Math.floor(Math.max(0,hp)/2);continue}
+    let tm=t[i+1],block=tm===0?pc0:tm===1?pc1:tm===2?pc2:pc3;
+    let dmg;
+    if(kind===1){
+      let sm=t[i+2],scanPray=sm===0?pc0:sm===1?pc1:sm===2?pc2:sm===3?pc3:-1;
+      let styleCode=scanPray===0?1:0; // a blob scanned into mage prayer attacks as range
+      if(block===styleCode)continue;
+      dmg=styleCode===1?t[i+3]:t[i+4];
+    }else{
+      if(block===t[i+2])continue;
+      dmg=t[i+3];
+    }
+    hp-=dmg;
+    if(hp<=0){died=true;break}
+  }
+  return{damage:died?startHp:Math.max(0,startHp-hp),died:died};
+}
 function calcSimDamage(attacks,prayerSeq,loadout,mobInitHP){
+  if(!(loadout.hasRecoil&&mobInitHP)&&!loadout.isBloodBarrage)return calcSimDamageNoRecoil(attacks,prayerSeq,loadout);
   let startHp=loadoutStartingHp(loadout),hp=startHp,maxHp=Math.max(startHp,loadoutBloodMaxHp(loadout)),minHp=startHp,died=false;
   let hasRecoil=loadout.hasRecoil&&mobInitHP;
   let hasRingRecoil=loadoutHasRingRecoil(loadout),hasEchoBoots=loadoutHasEchoBoots(loadout);
