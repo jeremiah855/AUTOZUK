@@ -503,8 +503,25 @@ function raycast(region,x1,y1,x2,y2){
   else{let yInc=dy>0?1:-1,slope=Math.trunc((dx<<16)/dyAbs),x=(x1<<16)+0x8000;if(dx<0)x-=1;let yTile=y1;while(yTile!==y2){yTile+=yInc;let xTile=x>>>16;if(bl[(xTile<<6)|yTile])return false;x+=slope;let nx=x>>>16;if(nx!==xTile&&bl[(nx<<6)|yTile])return false}}
   return true;
 }
-function mobHasLOS(region,mob,target){return mob.range===1?isWithinMeleeRange(mob,target):hasLineOfSight(region,mob.x,mob.y,target.x,target.y,mob.size,mob.range,true)}
-function playerHasLOS(region,px,py,mob,range){let cp=closestTileTo(mob,px,py);return hasLineOfSight(region,px,py,cp.x,cp.y,1,range,false)}
+// LOS is a pure function of positions, footprint and the blocked grid, so both
+// wrappers memoize on those inputs. region.blockedVersion invalidates the memo
+// when a pillar leaves the blocked grid.
+function mobHasLOS(region,mob,target){
+  if(mob.range===1)return isWithinMeleeRange(mob,target);
+  let bv=region.blockedVersion|0;
+  if(mob._losMX===mob.x&&mob._losMY===mob.y&&mob._losPX===target.x&&mob._losPY===target.y&&mob._losBV===bv)return mob._losVal;
+  let v=hasLineOfSight(region,mob.x,mob.y,target.x,target.y,mob.size,mob.range,true);
+  mob._losMX=mob.x;mob._losMY=mob.y;mob._losPX=target.x;mob._losPY=target.y;mob._losBV=bv;mob._losVal=v;
+  return v;
+}
+function playerHasLOS(region,px,py,mob,range){
+  let bv=region.blockedVersion|0;
+  if(mob._plosPX===px&&mob._plosPY===py&&mob._plosMX===mob.x&&mob._plosMY===mob.y&&mob._plosBV===bv)return mob._plosVal;
+  let cp=closestTileTo(mob,px,py);
+  let v=hasLineOfSight(region,px,py,cp.x,cp.y,1,range,false);
+  mob._plosPX=px;mob._plosPY=py;mob._plosMX=mob.x;mob._plosMY=mob.y;mob._plosBV=bv;mob._plosVal=v;
+  return v;
+}
 function isWithinMeleeRange(mob,target){let dx=target.x-mob.x,dy=target.y-mob.y,s=mob.size;return(dx<s&&dx>=0&&(dy===1||dy===-s))||(dy>-s&&dy<=0&&(dx===-1||dx===s))}
 function isWithinSecondaryMeleeRange(mob,target){
   // Ranger/mager/blob secondary melee can hit 1 tile from their footprint in any direction, including diagonals.
@@ -597,12 +614,13 @@ function createRegion(pillarConfig,pillarPercents){
   let blocked=new Uint8Array(4096); // 64×64 grid, index = (x<<6)|y
   for(let e of entities){let ex1=e.x+e.size-1,ey0=e.y-e.size+1;
     for(let ex=e.x;ex<=ex1;ex++)for(let ey=ey0;ey<=e.y;ey++)blocked[(ex<<6)|ey]=1}
-  return{entities,pillars:p2,blocked};
+  return{entities,pillars:p2,blocked,blockedVersion:0};
 }
 
 function removePillarCollision(region,pillar){
   region.entities=region.entities.filter(entity=>entity!==pillar);
   for(let x=pillar.x;x<pillar.x+pillar.size;x++)for(let y=pillar.y-pillar.size+1;y<=pillar.y;y++)region.blocked[(x<<6)|y]=0;
+  region.blockedVersion=(region.blockedVersion|0)+1;
   pillar.dead=true;pillar.collapsing=false;
 }
 function swTileAdjacentToPillar(entity,pillar){
@@ -697,7 +715,10 @@ function hlCreateMob(type,x,y,id){
     isBlob:d.isBlob||false,blobScanPrayer:null,hasDig:d.hasDig||false,digTimer:0,digLocation:null,
     hasFlicker:d.hasFlicker||false,flickering:false,incomingProjectiles:[],noLOSTicks:0,currentStyle:null,
     // Pre-declared so every mob shares one hidden class. These are assigned later.
-    infNum:undefined,aggroTarget:undefined,parentBlobId:undefined,pendingRemovalTick:undefined,_lastScanTick:undefined};
+    infNum:undefined,aggroTarget:undefined,parentBlobId:undefined,pendingRemovalTick:undefined,_lastScanTick:undefined,
+    // LOS memo slots for both directions. A value of -1 never matches a real coordinate.
+    _losMX:-1,_losMY:-1,_losPX:-1,_losPY:-1,_losBV:-1,_losVal:false,
+    _plosMX:-1,_plosMY:-1,_plosPX:-1,_plosPY:-1,_plosBV:-1,_plosVal:false};
 }
 function hlCreatePlayer(x,y,loadout){
   let startHp=loadoutStartingHp(loadout),maxHp=Math.max(startHp,loadoutBloodMaxHp(loadout));
