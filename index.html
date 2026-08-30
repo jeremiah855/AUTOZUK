@@ -713,6 +713,15 @@ function parseSpawnCode(code){
   return{spawns,hasIndexInfo:hasExplicit,hasPillarHp,pillarHp,baseCode,sanitizedCode:hasPillarHp?baseCode+suffix:baseCode,invalidPillarSuffix};
 }
 
+// A one-entry memo. parseSpawnCode is pure and engine callers never mutate the result.
+let _parseCache=null;
+function cachedParseSpawnCode(code){
+  if(_parseCache!==null&&_parseCache.code===code)return _parseCache.parsed;
+  let parsed=parseSpawnCode(code);
+  _parseCache={code,parsed};
+  return parsed;
+}
+
 function findRespawnLocation(size,region,mobs){for(let x=16;x<23;x++)for(let y=11;y<24;y++)if(!collidesWithMobs(x,y,size,mobs,null)&&!collidesWithEntities(x,y,size,region.entities))return{x,y};return{x:11,y:9}}
 
 // ===== SEEDED PRNG =====
@@ -751,7 +760,7 @@ function hlCreatePlayer(x,y,loadout){
 function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed){
   let idCounter=0;
   let rng = (seed===undefined||seed===null) ? Math.random : mulberry32(seed);
-  let parsed=parseSpawnCode(spawnCode);if(parsed.error)return null;
+  let parsed=cachedParseSpawnCode(spawnCode);if(parsed.error)return null;
   let dynamicPillars=parsed.hasPillarHp;
   let resolvedPillars=effectivePillarConfig(parsed,pillarConfig);
   let region=dynamicPillars?createRegion(resolvedPillars,pillarPercentConfig(parsed)):(cachedRegion||createRegion(resolvedPillars));
@@ -768,7 +777,7 @@ function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed)
   let mobInitHP={};
   let mobMap=new Map();
   for(let m of mobs){mobInitHP[m.id]={hp:m.hp,type:m.type};mobMap.set(m.id,m)}
-  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng,deadCount:0,mobEpoch:0,_cleanupEpoch:-1,_cleanupVal:null};
+  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng,deadCount:0,dyingCount:0,pendingRemovalCount:0,mobEpoch:0,_cleanupEpoch:-1,_cleanupVal:null};
 }
 // One shared shape for every attack log record keeps the damage loops
 // monomorphic. Unset fields read exactly as absent fields would.
@@ -779,28 +788,31 @@ function mkAttackRecord(tick){
     isRevive:false,reviveHp:undefined,
     isPillarCollapsePlayerDamage:false,isPillarCollapseMobDamage:false,pillarId:undefined,damage:undefined,killsNibbler:false};
 }
-function hlMarkMobForProjectileRemoval(mob,tick){
+function hlMarkMobForProjectileRemoval(mob,tick,S){
   if(mob.dead)return;
   mob.hp=0;
   if(mob.pendingRemovalTick===undefined||mob.pendingRemovalTick>tick+1){
+    if(mob.pendingRemovalTick===undefined)S.pendingRemovalCount++;
     mob.pendingRemovalTick=tick+1;
     mob.dyingStartTick=tick;
   }
 }
 function hlProcessCorpseExpiry(S,tick){
+  if(S.dyingCount===0)return;
   for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying<=0)continue;
     let remain=(mob.corpseRemovalTick??tick)-tick;
-    if(remain<=0){mob.dead=true;S.deadCount++;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
+    if(remain<=0){mob.dead=true;S.deadCount++;S.dyingCount--;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
     else mob.dying=remain;
   }
 }
 function hlProcessPendingMobDeaths(S,tick){
+  if(S.pendingRemovalCount===0)return;
   let player=S.player;
   for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying>0)continue;
     if(mob.pendingRemovalTick!==undefined&&mob.pendingRemovalTick<=tick){
-      S.mobEpoch++;
+      S.mobEpoch++;S.pendingRemovalCount--;S.dyingCount++;
       mob.pendingRemovalTick=undefined;
       mob.dying=DEATH_ANIM_TICKS;
       mob.corpseRemovalTick=tick+DEATH_ANIM_TICKS;
@@ -823,7 +835,7 @@ function hlProcessPillarTransitions(S,tick){
       let mob=S.mobMap.get(mobId);
       if(!mob||mob.dead||mob.dying>0||mob.hp<=0)continue;
       let damage=mob.type==='nibbler'?mob.hp:Math.floor(mob.hp/2);
-      if(damage>0){mob.hp-=damage;let a=mkAttackRecord(tick);a.isPillarCollapseMobDamage=true;a.pillarId=pillar.id;a.mobId=mob.id;a.damage=damage;a.killsNibbler=mob.type==='nibbler';S.attacks.push(a);if(mob.hp<=0)hlMarkMobForProjectileRemoval(mob,tick-1)}
+      if(damage>0){mob.hp-=damage;let a=mkAttackRecord(tick);a.isPillarCollapseMobDamage=true;a.pillarId=pillar.id;a.mobId=mob.id;a.damage=damage;a.killsNibbler=mob.type==='nibbler';S.attacks.push(a);if(mob.hp<=0)hlMarkMobForProjectileRemoval(mob,tick-1,S)}
     }
     removePillarCollision(S.region,pillar);
   }
@@ -841,7 +853,7 @@ function hlTick(S){
   // Mob attacks (must happen before player projectile processing so lastAttacker is current)
   for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0||mob.stunned>0)continue;mob.attackDelay--;hlMobAttack(mob,player,region,mobs,t,S)}
   // Player projectiles land after NPC actions for this tick. Fatal hits remove on T+1.
-  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0)continue;let arr=mob.incomingProjectiles;if(arr.length===0)continue;let w=0;for(let k=0;k<arr.length;k++){let p=arr[k];p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){hlMarkMobForProjectileRemoval(mob,t)}}}else arr[w++]=p}arr.length=w}
+  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0)continue;let arr=mob.incomingProjectiles;if(arr.length===0)continue;let w=0;for(let k=0;k<arr.length;k++){let p=arr[k];p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){hlMarkMobForProjectileRemoval(mob,t,S)}}}else arr[w++]=p}arr.length=w}
   // Process player incoming projectiles (auto-retaliate)
   {let parr=player.incomingProjectiles,arrivedCount=0;
     if(parr.length){let w=0;for(let k=0;k<parr.length;k++){let p=parr[k];p.delay--;if(p.delay<=0)arrivedCount++;else parr[w++]=p}parr.length=w}
@@ -958,7 +970,7 @@ function hlMobAttack(mob,player,region,mobs,tick,S){
   }
   mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
   if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
-    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();S.mobEpoch++;toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;if(toRes.dead)S.deadCount--;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
+    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();S.mobEpoch++;toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;if(toRes.dead)S.deadCount--;if(toRes.dying>0)S.dyingCount--;if(toRes.pendingRemovalTick!==undefined)S.pendingRemovalCount--;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
       let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;if(!mobs.includes(toRes))mobs.push(toRes);
       {let a=mkAttackRecord(tick);a.mobId=toRes.id;a.mobType=toRes.type;a.isRevive=true;a.reviveHp=reviveHp;S.attacks.push(a)}
       mob.attackDelay=mob.atkSpeed*2;return}
@@ -979,9 +991,10 @@ function hlFireAttack(mob,player,tick,S,styleOrBlobFlag,scanTick){
   // Calculate projectile delay for auto-retaliate timing. Blob damage style remains
   // prayer-resolved post-hoc unless the blob rolls its secondary melee here.
   let projectileStyle=isBlob?(mob.currentStyle||'magic'):style;
-  if(canUseSecondaryMelee(mob,player)&&S.rng()<0.5){projectileStyle='melee';style='melee';isBlob=false}
-  let delay=monsterProjectileDelay(mob,projectileStyle,player);
+  // edgeDist doubles as the secondary melee adjacency test, so it is computed once
   let edgeDist=distToMob(player.x,player.y,mob);
+  if((mob.type==='mager'||mob.type==='ranger'||mob.type==='blob')&&edgeDist===1&&S.rng()<0.5){projectileStyle='melee';style='melee';isBlob=false}
+  let delay=monsterProjectileDelay(mob,projectileStyle,player);
   player.incomingProjectiles.push({delay:delay+1,damage:0,mobType:mob.type,mobId:mob.id,style:projectileStyle});
   // last_attacker is set when mob fires, not when projectile lands
   setPlayerLastAttacker(player,mob);
@@ -1055,9 +1068,11 @@ function hlRunSim(spawnCode,playerPos,pillarConfig,loadout,maxTicks,cachedRegion
     if(cleanupReason)return{attacks:S.attacks,completedTick:S.tick,mobs:S.mobs,status:'cleanup',cleanupReason,mobInitHP:S.mobInitHP};
     // Check trapped
     if(!S.player.aggro&&!hlHasActivePillarThreat(S)){
-      let allNoLOS=true,trappedBig=[],activeCount=0;
-      for(let j=0;j<S.mobs.length;j++){let m=S.mobs[j];if(m.dead||m.dying>0||m.hp<=0)continue;activeCount++;if(m.noLOSTicks<20){allNoLOS=false;break}if(m.type!=='nibbler'&&!m.type.startsWith('bloblet'))trappedBig.push(m)}
+      let allNoLOS=true,activeCount=0;
+      for(let j=0;j<S.mobs.length;j++){let m=S.mobs[j];if(m.dead||m.dying>0||m.hp<=0)continue;activeCount++;if(m.noLOSTicks<20){allNoLOS=false;break}}
       if(allNoLOS&&activeCount>0&&deadCount<S.mobs.length){
+        let trappedBig=[];
+        for(let j=0;j<S.mobs.length;j++){let m=S.mobs[j];if(m.dead||m.dying>0||m.hp<=0)continue;if(m.type!=='nibbler'&&!m.type.startsWith('bloblet'))trappedBig.push(m)}
         return{attacks:S.attacks,completedTick:S.tick,mobs:S.mobs,status:hlTrappedResultStatus(S,trappedBig),mobInitHP:S.mobInitHP};
       }
     }
@@ -1105,7 +1120,7 @@ function checkTileExcluded(x,y,mobs,region){
 // =====================================================
 function optimizePrayer(allSimResults,spawnCode,pillarConfig,loadout){
   // Determine which big3 types exist
-  let parsed=parseSpawnCode(spawnCode);
+  let parsed=cachedParseSpawnCode(spawnCode);
   let mobTypes=new Set();
   for(let s of parsed.spawns)if(s.type!=='nothing')mobTypes.add(s.type);
   let hasMager=mobTypes.has('mager'),hasRanger=mobTypes.has('ranger'),hasMeleer=mobTypes.has('meleer');
