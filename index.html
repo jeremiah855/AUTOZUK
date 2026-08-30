@@ -769,7 +769,7 @@ function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed)
   let mobInitHP={};
   let mobMap=new Map();
   for(let m of mobs){mobInitHP[m.id]={hp:m.hp,type:m.type};mobMap.set(m.id,m)}
-  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng,deadCount:0};
+  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng,deadCount:0,mobEpoch:0,_cleanupEpoch:-1,_cleanupVal:null};
 }
 // One shared shape for every attack log record keeps the damage loops
 // monomorphic. Unset fields read exactly as absent fields would.
@@ -801,6 +801,7 @@ function hlProcessPendingMobDeaths(S,tick){
   for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying>0)continue;
     if(mob.pendingRemovalTick!==undefined&&mob.pendingRemovalTick<=tick){
+      S.mobEpoch++;
       mob.pendingRemovalTick=undefined;
       mob.dying=DEATH_ANIM_TICKS;
       mob.corpseRemovalTick=tick+DEATH_ANIM_TICKS;
@@ -958,7 +959,7 @@ function hlMobAttack(mob,player,region,mobs,tick,S){
   }
   mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
   if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
-    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;if(toRes.dead)S.deadCount--;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
+    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();S.mobEpoch++;toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;if(toRes.dead)S.deadCount--;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
       let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;if(!mobs.includes(toRes))mobs.push(toRes);
       {let a=mkAttackRecord(tick);a.mobId=toRes.id;a.mobType=toRes.type;a.isRevive=true;a.reviveHp=reviveHp;S.attacks.push(a)}
       mob.attackDelay=mob.atkSpeed*2;return}
@@ -991,7 +992,7 @@ function hlFireAttack(mob,player,tick,S,styleOrBlobFlag,scanTick){
     a.accRoll=S.rng();a.dmgRoll=S.rng();a.distAtFire=edgeDist;a.hitTick=tick+delay;S.attacks.push(a)}
 }
 function hlSpawnBlobletsFromBlob(blob,tick,S){
-  let mobs=S.mobs;
+  let mobs=S.mobs;S.mobEpoch++;
   let bm=hlCreateMob('blobletMage',blob.x+2,blob.y-2,S.idCounter++);bm.stunned=0;bm.frozen=1;bm.attackDelay=4;bm.parentBlobId=blob.id;mobs.push(bm);
   let br=hlCreateMob('blobletRange',blob.x+1,blob.y-1,S.idCounter++);br.stunned=0;br.frozen=1;br.attackDelay=4;br.parentBlobId=blob.id;mobs.push(br);
   let bx=hlCreateMob('blobletMelee',blob.x,blob.y,S.idCounter++);bx.stunned=0;bx.frozen=1;bx.attackDelay=4;bx.parentBlobId=blob.id;mobs.push(bx);
@@ -1023,6 +1024,14 @@ function hlOnDeath(mob,player,region,mobs,tick,S){
 
 function hlRequiresFullClear(S){return (S.initialEnemyCount||0)<=3}
 function hlCleanupStopReason(S){
+  // The inputs change only at death, spawn and revive events, which all bump
+  // S.mobEpoch. The undefined check keeps hand-built states without the epoch
+  // fields uncached.
+  if(S._cleanupEpoch!==undefined&&S._cleanupEpoch===S.mobEpoch)return S._cleanupVal;
+  S._cleanupEpoch=S.mobEpoch;
+  return S._cleanupVal=hlCleanupStopReasonUncached(S);
+}
+function hlCleanupStopReasonUncached(S){
   if(hlRequiresFullClear(S))return null;
   if((S.delayedBlobletSpawns||[]).length>0)return null;
   let active=0,allBloblets=true;
