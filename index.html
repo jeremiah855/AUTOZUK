@@ -1106,15 +1106,16 @@ function optimizePrayer(allSimResults,spawnCode,pillarConfig,loadout){
   let slots=[null,null,null,null]; // slots[i] = prayer type or null (unknown)
   // Look at first attacks from big3 across all sims to find consistent slot
   let slotVotes={mager:{},ranger:{},meleer:{}};
+  // Only the first attack per big three type per sim votes. The scan stops
+  // once every present type has voted.
   for(let result of allSimResults){
-    for(let atk of result.attacks){
+    let atks=result.attacks,fM=!hasMager,fR=!hasRanger,fX=!hasMeleer;
+    for(let i=0;i<atks.length&&!(fM&&fR&&fX);i++){let atk=atks[i];
       if(atk.isScan)continue;
-      if(atk.mobType==='mager'&&hasMager&&!slotVotes.mager.found){slotVotes.mager[atk.tick%4]=(slotVotes.mager[atk.tick%4]||0)+1;slotVotes.mager.found=true}
-      if(atk.mobType==='ranger'&&hasRanger&&!slotVotes.ranger.found){slotVotes.ranger[atk.tick%4]=(slotVotes.ranger[atk.tick%4]||0)+1;slotVotes.ranger.found=true}
-      if(atk.mobType==='meleer'&&hasMeleer&&!slotVotes.meleer.found){slotVotes.meleer[atk.tick%4]=(slotVotes.meleer[atk.tick%4]||0)+1;slotVotes.meleer.found=true}
+      if(!fM&&atk.mobType==='mager'){slotVotes.mager[atk.tick%4]=(slotVotes.mager[atk.tick%4]||0)+1;fM=true}
+      if(!fR&&atk.mobType==='ranger'){slotVotes.ranger[atk.tick%4]=(slotVotes.ranger[atk.tick%4]||0)+1;fR=true}
+      if(!fX&&atk.mobType==='meleer'){slotVotes.meleer[atk.tick%4]=(slotVotes.meleer[atk.tick%4]||0)+1;fX=true}
     }
-    // Reset found for next sim
-    delete slotVotes.mager.found;delete slotVotes.ranger.found;delete slotVotes.meleer.found;
   }
   // Assign slots for big3
   function getBestSlot(votes){let best=-1,bestCount=0;for(let s=0;s<4;s++){let c=votes[s]||0;if(c>bestCount){bestCount=c;best=s}}return best}
