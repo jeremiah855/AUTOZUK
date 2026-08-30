@@ -547,8 +547,7 @@ function playerHasLOS(region,px,py,mob,range){
 function isWithinMeleeRange(mob,target){let dx=target.x-mob.x,dy=target.y-mob.y,s=mob.size;return(dx<s&&dx>=0&&(dy===1||dy===-s))||(dy>-s&&dy<=0&&(dx===-1||dx===s))}
 function isWithinSecondaryMeleeRange(mob,target){
   // Ranger/mager/blob secondary melee can hit 1 tile from their footprint in any direction, including diagonals.
-  let ct=closestTileTo(mob,target.x,target.y);
-  return chebyshev(target.x,target.y,ct.x,ct.y)===1;
+  return distToMob(target.x,target.y,mob)===1;
 }
 function canUseSecondaryMelee(mob,player){
   return (mob.type==='mager'||mob.type==='ranger'||mob.type==='blob')&&isWithinSecondaryMeleeRange(mob,player);
@@ -1192,6 +1191,7 @@ function loadoutStartingHp(loadout){let hp=Number(loadout?.startingHp??99);if(!N
 // Must stay result-identical to calcSimDamage with hasRecoil=false.
 function calcSimDamageNoRecoil(attacks,prayerSeq,loadout){
   let startHp=loadoutStartingHp(loadout),hp=startHp,died=false;
+  let monsterAtk=loadout.monsterAtk;
   for(let i=0;i<attacks.length;i++){let atk=attacks[i];
     if(atk.isScan||atk.isPlayerAttack||atk.isRevive||atk.isPillarCollapseMobDamage)continue;
     if(atk.isPillarCollapsePlayerDamage){hp-=Math.floor(Math.max(0,hp)/2);continue}
@@ -1201,8 +1201,11 @@ function calcSimDamageNoRecoil(attacks,prayerSeq,loadout){
     if(atkStyle==='magic'&&prayOnTick==='mage')continue;
     if(atkStyle==='range'&&prayOnTick==='range')continue;
     if(atkStyle==='melee'&&prayOnTick==='melee')continue;
-    let atkStats=resolveMonsterAttackStats(loadout,atk.mobType,atkStyle);
+    // Inline resolveMonsterAttackStats with monsterAtk hoisted out of the loop
+    let atkStats=monsterAtk[atk.mobType];
     if(!atkStats)continue;
+    if(atkStyle==='melee'&&atkStats.melee)atkStats=atkStats.melee;
+    else if(atk.mobType==='blob')atkStats=atkStyle==='magic'?atkStats.mage:atkStats.range;
     if(atk.accRoll<atkStats.acc){
       hp-=Math.floor(atk.dmgRoll*(atkStats.max+1));
       if(hp<=0){died=true;break}
