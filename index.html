@@ -600,6 +600,7 @@ function osrsWalkStep(sx,sy,tx,ty,region){
 
 const DEATH_ANIM_TICKS=3;
 const PILLAR_MAX_HP=255;
+const AOE_OFFSETS=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
 
 function pillarHpFromPercent(percent){
   percent=Number(percent)||0;
@@ -768,7 +769,7 @@ function hlMarkMobForProjectileRemoval(mob,tick){
   }
 }
 function hlProcessCorpseExpiry(S,tick){
-  for(let mob of S.mobs){
+  for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying<=0)continue;
     let remain=(mob.corpseRemovalTick??tick)-tick;
     if(remain<=0){mob.dead=true;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
@@ -777,7 +778,7 @@ function hlProcessCorpseExpiry(S,tick){
 }
 function hlProcessPendingMobDeaths(S,tick){
   let player=S.player;
-  for(let mob of S.mobs){
+  for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying>0)continue;
     if(mob.pendingRemovalTick!==undefined&&mob.pendingRemovalTick<=tick){
       mob.pendingRemovalTick=undefined;
@@ -814,15 +815,17 @@ function hlTick(S){
   hlProcessCorpseExpiry(S,t);
   hlProcessPendingMobDeaths(S,t);
   hlProcessDelayedBlobletSpawns(S,t);
-  // Move mobs
-  for(let mob of mobs){if(mob.dead||mob.dying>0)continue;if(mob.stunned>0){mob.stunned--;continue}if(mob.frozen>0){mob.frozen--;continue}hlMoveMob(mob,player,region,mobs,S)}
+  // Move mobs. The length is re-read every iteration on purpose because mobs
+  // pushed mid-loop must still be visited.
+  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0)continue;if(mob.stunned>0){mob.stunned--;continue}if(mob.frozen>0){mob.frozen--;continue}hlMoveMob(mob,player,region,mobs,S)}
   // Mob attacks (must happen before player projectile processing so lastAttacker is current)
-  for(let mob of mobs){if(mob.dead||mob.dying>0||mob.stunned>0)continue;mob.attackDelay--;hlMobAttack(mob,player,region,mobs,t,S)}
+  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0||mob.stunned>0)continue;mob.attackDelay--;hlMobAttack(mob,player,region,mobs,t,S)}
   // Player projectiles land after NPC actions for this tick. Fatal hits remove on T+1.
-  for(let mob of mobs){if(mob.dead||mob.dying>0)continue;let rem=[];for(let p of mob.incomingProjectiles){p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){hlMarkMobForProjectileRemoval(mob,t)}}}else rem.push(p)}mob.incomingProjectiles=rem}
+  for(let i=0;i<mobs.length;i++){let mob=mobs[i];if(mob.dead||mob.dying>0)continue;let arr=mob.incomingProjectiles;if(arr.length===0)continue;let w=0;for(let k=0;k<arr.length;k++){let p=arr[k];p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){hlMarkMobForProjectileRemoval(mob,t)}}}else arr[w++]=p}arr.length=w}
   // Process player incoming projectiles (auto-retaliate)
-  {let rem=[],arrived=[];for(let p of player.incomingProjectiles){p.delay--;if(p.delay<=0){arrived.push(p)}else rem.push(p)}
-    if(player.autoRetaliate&&arrived.length>0){
+  {let parr=player.incomingProjectiles,arrivedCount=0;
+    if(parr.length){let w=0;for(let k=0;k<parr.length;k++){let p=parr[k];p.delay--;if(p.delay<=0)arrivedCount++;else parr[w++]=p}parr.length=w}
+    if(player.autoRetaliate&&arrivedCount>0){
       if(!player.aggro||player.aggro.dead||(player.aggro.dying>0&&t>player.aggro.dyingStartTick)){
         // Target lastAttacker (set when mob fires, not when projectile lands)
         let target=player.lastAttacker;
@@ -830,7 +833,7 @@ function hlTick(S){
           player.aggro=target;let fd=Math.floor(loadout.atkSpeed/2)+1;if(player.attackDelay<fd)player.attackDelay=fd}
       }
     }
-    player.incomingProjectiles=rem}
+  }
   // Player attack
   player.attackDelay--;
   // Player movement — running (2 steps/tick), face tile destination
@@ -864,12 +867,12 @@ function hlTick(S){
     S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:dmg,targetMobId:target.id,targetMobType:target.type,hitTick:t+delay});
     // Blood barrage: 3x3 AOE around target's SW tile
     if(loadout.isBloodBarrage){
-      let aoeOffsets=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
       let hitCount=1; // primary target already hit
-      for(let off of aoeOffsets){
+      for(let oi=0;oi<AOE_OFFSETS.length;oi++){
+        let off=AOE_OFFSETS[oi];
         if(hitCount>=9)break;
         let ax=target.x+off[0],ay=target.y+off[1];
-        for(let m of mobs){
+        for(let mi=0;mi<mobs.length;mi++){let m=mobs[mi];
           if(m.dead||m.dying>0||m.pendingRemovalTick!==undefined||m===target)continue;
           // Check if mob's SW tile matches AOE offset position
           if(m.x===ax&&m.y===ay){
@@ -1002,10 +1005,11 @@ function hlRequiresFullClear(S){return (S.initialEnemyCount||0)<=3}
 function hlCleanupStopReason(S){
   if(hlRequiresFullClear(S))return null;
   if((S.delayedBlobletSpawns||[]).length>0)return null;
-  let active=S.mobs.filter(m=>!m.dead&&m.dying<=0);
-  if(active.length===0)return null;
-  if(active.every(m=>m.type.startsWith('bloblet')))return 'bloblets';
-  if((S.initialEnemyCount||0)>=4&&active.length===1)return 'last-enemy';
+  let active=0,allBloblets=true;
+  for(let i=0;i<S.mobs.length;i++){let m=S.mobs[i];if(m.dead||m.dying>0)continue;active++;if(!m.type.startsWith('bloblet'))allBloblets=false}
+  if(active===0)return null;
+  if(allBloblets)return 'bloblets';
+  if((S.initialEnemyCount||0)>=4&&active===1)return 'last-enemy';
   return null;
 }
 function hlTrappedResultStatus(S,trappedBig){return !hlRequiresFullClear(S)&&checkTrappedValid(trappedBig)?'trapped':'invalid'}
