@@ -435,7 +435,12 @@ const LOADOUTS = {
 function chebyshev(x1,y1,x2,y2){return Math.max(Math.abs(x2-x1),Math.abs(y2-y1))}
 function collisionMath(x,y,s,x2,y2,s2){return !(x>x2+s2-1||x+s-1<x2||y-s+1>y2||y<y2-s2+1)}
 function closestTileTo(mob,tx,ty){return{x:Math.max(mob.x,Math.min(mob.x+mob.size-1,tx)),y:Math.max(mob.y-mob.size+1,Math.min(mob.y,ty))}}
-function distToMob(px,py,mob){let ct=closestTileTo(mob,px,py);return chebyshev(px,py,ct.x,ct.y)}
+function distToMob(px,py,mob){
+  let cx=px<mob.x?mob.x:px,mx=mob.x+mob.size-1;if(cx>mx)cx=mx;
+  let my=mob.y-mob.size+1,cy=py>mob.y?mob.y:py;if(cy<my)cy=my;
+  let dx=px-cx;if(dx<0)dx=-dx;let dy=py-cy;if(dy<0)dy=-dy;
+  return dx>dy?dx:dy;
+}
 function collidesWithEntities(x,y,s,entities){for(let i=0;i<entities.length;i++){let e=entities[i];if(collisionMath(x,y,s,e.x,e.y,e.size))return true}return false}
 function collidesWithMobs(x,y,s,mobs,exclude,skipNibblers){for(let i=0;i<mobs.length;i++){let m=mobs[i];if(m===exclude||m.dead)continue;if(exclude&&exclude.parentBlobId===m.id&&m.dying>0)continue;if(skipNibblers&&m.type==='nibbler')continue;if(collisionMath(x,y,s,m.x,m.y,m.size))return m}return null}
 // Any live non-nibbler mob (except `exclude`) overlapping the tile rect [x0..x1]x[y0..y1]?
@@ -473,7 +478,13 @@ function monsterProjectileOrigin(mob){
   if(mob.type==='ranger'||mob.type==='blob')return{x:mob.x+1,y:mob.y-1}; // center tile of 3x3
   return{x:mob.x,y:mob.y};
 }
-function monsterProjectileDistance(px,py,mob){let o=monsterProjectileOrigin(mob);return chebyshev(px,py,o.x,o.y)}
+function monsterProjectileDistance(px,py,mob){
+  let ox=mob.x,oy=mob.y,ty=mob.type;
+  if(ty==='mager'){ox+=2;oy-=2}
+  else if(ty==='ranger'||ty==='blob'){ox+=1;oy-=1}
+  let dx=px-ox;if(dx<0)dx=-dx;let dy=py-oy;if(dy<0)dy=-dy;
+  return dx>dy?dx:dy;
+}
 function monsterProjectileDelay(mob,style,player){
   if(style==='melee')return 1;
   let originDist=monsterProjectileDistance(player.x,player.y,mob);
@@ -758,7 +769,7 @@ function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed)
   let mobInitHP={};
   let mobMap=new Map();
   for(let m of mobs){mobInitHP[m.id]={hp:m.hp,type:m.type};mobMap.set(m.id,m)}
-  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng};
+  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],initialEnemyCount,dynamicPillars,rng,deadCount:0};
 }
 function hlMarkMobForProjectileRemoval(mob,tick){
   if(mob.dead)return;
@@ -772,7 +783,7 @@ function hlProcessCorpseExpiry(S,tick){
   for(let i=0;i<S.mobs.length;i++){let mob=S.mobs[i];
     if(mob.dead||mob.dying<=0)continue;
     let remain=(mob.corpseRemovalTick??tick)-tick;
-    if(remain<=0){mob.dead=true;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
+    if(remain<=0){mob.dead=true;S.deadCount++;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
     else mob.dying=remain;
   }
 }
@@ -938,7 +949,7 @@ function hlMobAttack(mob,player,region,mobs,tick,S){
   }
   mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
   if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
-    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
+    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;if(toRes.dead)S.deadCount--;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
       let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;if(!mobs.includes(toRes))mobs.push(toRes);
       S.attacks.push({tick,mobId:toRes.id,mobType:toRes.type,isRevive:true,reviveHp});
       mob.attackDelay=mob.atkSpeed*2;return}
@@ -1020,8 +1031,8 @@ function hlRunSim(spawnCode,playerPos,pillarConfig,loadout,maxTicks,cachedRegion
   let S=hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed);if(!S)return null;
   for(let i=0;i<maxTicks;i++){
     hlTick(S);
-    // Check wave complete — count dead mobs only when something changed
-    let deadCount=0;for(let j=0;j<S.mobs.length;j++)if(S.mobs[j].dead)deadCount++;
+    // Check wave complete. S.deadCount tracks the dead flag transitions.
+    let deadCount=S.deadCount;
     if(deadCount===S.mobs.length)return{attacks:S.attacks,completedTick:S.tick,mobs:S.mobs,status:'complete',mobInitHP:S.mobInitHP};
     let cleanupReason=hlCleanupStopReason(S);
     if(cleanupReason)return{attacks:S.attacks,completedTick:S.tick,mobs:S.mobs,status:'cleanup',cleanupReason,mobInitHP:S.mobInitHP};
@@ -1156,7 +1167,32 @@ function loadoutBloodHealRate(loadout){return loadoutHasBloodSceptre(loadout)?0.
 function loadoutBloodMaxHp(loadout){return loadoutHasBloodSceptre(loadout)?108:99}
 function loadoutStartingHp(loadout){let hp=Number(loadout?.startingHp??99);if(!Number.isFinite(hp))hp=99;return Math.max(1,Math.min(115,Math.round(hp)))}
 
+// Lean path for loadouts without recoil tracking (no blood-barrage heal either,
+// since both recoil loadouts imply hasRecoil): only prayer blocking and damage
+// accumulation remain, with none of the pending-hit machinery or its closures.
+// Must stay result-identical to calcSimDamage with hasRecoil=false.
+function calcSimDamageNoRecoil(attacks,prayerSeq,loadout){
+  let startHp=loadoutStartingHp(loadout),hp=startHp,died=false;
+  for(let i=0;i<attacks.length;i++){let atk=attacks[i];
+    if(atk.isScan||atk.isPlayerAttack||atk.isRevive||atk.isPillarCollapseMobDamage)continue;
+    if(atk.isPillarCollapsePlayerDamage){hp-=Math.floor(Math.max(0,hp)/2);continue}
+    let prayOnTick=prayerSeq[atk.tick%4];
+    let atkStyle=atk.style;
+    if(atkStyle===null){atkStyle=(prayerSeq[atk.scanTick%4]==='mage')?'range':'magic'}
+    if(atkStyle==='magic'&&prayOnTick==='mage')continue;
+    if(atkStyle==='range'&&prayOnTick==='range')continue;
+    if(atkStyle==='melee'&&prayOnTick==='melee')continue;
+    let atkStats=resolveMonsterAttackStats(loadout,atk.mobType,atkStyle);
+    if(!atkStats)continue;
+    if(atk.accRoll<atkStats.acc){
+      hp-=Math.floor(atk.dmgRoll*(atkStats.max+1));
+      if(hp<=0){died=true;break}
+    }
+  }
+  return{damage:died?startHp:Math.max(0,startHp-hp),died:died};
+}
 function calcSimDamage(attacks,prayerSeq,loadout,mobInitHP){
+  if(!(loadout.hasRecoil&&mobInitHP)&&!loadout.isBloodBarrage)return calcSimDamageNoRecoil(attacks,prayerSeq,loadout);
   let startHp=loadoutStartingHp(loadout),hp=startHp,maxHp=Math.max(startHp,loadoutBloodMaxHp(loadout)),minHp=startHp,died=false;
   let hasRecoil=loadout.hasRecoil&&mobInitHP;
   let hasRingRecoil=loadoutHasRingRecoil(loadout),hasEchoBoots=loadoutHasEchoBoots(loadout);
