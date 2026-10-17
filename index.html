@@ -231,6 +231,7 @@ canvas#grid{border:1px solid var(--panel-border);cursor:crosshair;image-renderin
             <select id="activeLoadoutSelect" onchange="changeLoadout(this.value)" style="background:var(--bg);border:1px solid var(--panel-border);color:var(--text);padding:6px 8px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;width:100%;cursor:pointer">
               <option value="ayak" selected>Ayak</option>
               <option value="bloodBarrage">Blood Barrage</option>
+              <option value="sang">Sanguinesti</option>
             </select>
           </div>
           <button class="gear-wrench-btn" onclick="openEquipmentSelector()" title="Advanced gear options" aria-label="Advanced gear options">&#128295;</button>
@@ -428,6 +429,20 @@ const LOADOUTS = {
       blobletMelee:{max:18,acc:0.0576}, blobletMage:{max:18,acc:0.3843}, blobletRange:{max:18,acc:0.0793},
       meleer:{max:49,acc:0.094}, ranger:{max:46,acc:0.1862,melee:{max:19,acc:0.0665}}, mager:{max:70,acc:0.8322,melee:{max:52,acc:0.1737}}
     }
+  },
+  sang: {
+    name: 'Sanguinesti', atkSpeed: 4, maxHit: 45, range: 7, startingHp: 99, isSang: true, hasRecoil: true, hasRingRecoil: true, hasEchoBoots: true,
+    playerAcc: { // [afterHit, afterMiss] — Confliction Gauntlets
+      nibbler:[0.9709,0.9989], bat:[0.8438,0.9675], blob:[0.5863,0.7718],
+      blobletMelee:[0.9823,0.9996], blobletMage:[0.6842,0.867], blobletRange:[0.9823,0.9996],
+      meleer:[0.6664,0.8516], ranger:[0.8257,0.9595], mager:[0.4596,0.6128]
+    },
+    monsterAtk: {
+      nibbler:{max:4,acc:1.0}, bat:{max:19,acc:0.0843},
+      blob:{mage:{max:29,acc:0.5983},range:{max:29,acc:0.1281},melee:{max:29,acc:0.0762}},
+      blobletMelee:{max:18,acc:0.0582}, blobletMage:{max:18,acc:0.3879}, blobletRange:{max:18,acc:0.0799},
+      meleer:{max:49,acc:0.1537}, ranger:{max:46,acc:0.1873,melee:{max:19,acc:0.0672}}, mager:{max:70,acc:0.8337,melee:{max:52,acc:0.1741}}
+    }
   }
 };
 
@@ -480,11 +495,15 @@ function monsterProjectileDelay(mob,style,player){
 function playerBlowpipeDelay(){return 2}
 function playerAyakDelay(dist){if(dist<=2)return 2;return 3}
 function playerBarrageDelay(dist){if(dist<=1)return 2;if(dist<=3)return 3;if(dist<=7)return 4;return 5}
+// Sanguinesti: standard magic projectile, 1+floor((1+dist)/3) ticks plus the hitsplat tick
+function playerSangDelay(dist){return 2+Math.floor((1+dist)/3)}
 // Blood barrage calculates distance to mob's SW tile directly
 function playerProjectileDelay(loadout,px,py,target){
   if(loadout.atkSpeed===2)return playerBlowpipeDelay(); // blowpipe
   if(loadout.isBloodBarrage){let swDist=chebyshev(px,py,target.x,target.y);return playerBarrageDelay(swDist)}
-  let dist=distToMob(px,py,target);return playerAyakDelay(dist); // mage tank
+  let dist=distToMob(px,py,target);
+  if(loadout.isSang)return playerSangDelay(dist);
+  return playerAyakDelay(dist); // mage tank
 }
 
 function hasLineOfSight(region,x1,y1,x2,y2,s,r,isNPC){
@@ -824,10 +843,13 @@ function hlTick(S){
     let hit=S.rng()<acc;
     let dmg=0;
     if(hit){dmg=Math.floor(S.rng()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
+    // Sanguinesti passive: 1/5 successful hits deal +8 and heal half the damage dealt
+    let sangHeal=0;
+    if(hit&&loadout.isSang&&S.rng()<0.2){dmg+=8;sangHeal=Math.floor(dmg/2)}
     target.incomingProjectiles.push({delay,damage:dmg});
     // Record player attack event for post HP calculation. Damage is rolled now,
     // but mob HP/death is applied when the projectile lands.
-    S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:dmg,targetMobId:target.id,targetMobType:target.type,hitTick:t+delay});
+    S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:dmg,targetMobId:target.id,targetMobType:target.type,hitTick:t+delay,sangHeal});
     // Blood barrage: 3x3 AOE around target's SW tile
     if(loadout.isBloodBarrage){
       let aoeOffsets=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
@@ -1188,6 +1210,8 @@ function calcSimDamage(attacks,prayerSeq,loadout,mobInitHP){
       if(loadout.isBloodBarrage&&atk.playerDmg>0&&hp<maxHp){
         hp=Math.min(maxHp,hp+Math.floor(atk.playerDmg*loadoutBloodHealRate(loadout)));
       }
+      // Sanguinesti heal also applies at cast time, matching the event timeline above.
+      if(atk.sangHeal>0&&hp<maxHp)hp=Math.min(maxHp,hp+atk.sangHeal);
       if(hasRecoil&&atk.targetMobId!==undefined&&mobHP[atk.targetMobId]!==undefined){
         pendingPlayerHits.push({tick:atk.hitTick!==undefined?atk.hitTick:atk.tick,mobId:atk.targetMobId,damage:atk.playerDmg});
       }
@@ -1256,7 +1280,7 @@ function calcSimDamage(attacks,prayerSeq,loadout,mobInitHP){
         mobHP[r.mobId]-=r.damage;if(mobHP[r.mobId]<=0)scheduleMobRemoval(r.mobId,r.tick)}
     }
   }
-  return{damage:died?startHp:(loadout.isBloodBarrage?Math.max(0,startHp-minHp):Math.max(0,startHp-hp)),died:died};
+  return{damage:died?startHp:((loadout.isBloodBarrage||loadout.isSang)?Math.max(0,startHp-minHp):Math.max(0,startHp-hp)),died:died};
 }
 // ===== Phase-1-shared helpers (also called from hl* in sim-core) =====
 function canSetLastAttacker(player,mob){let a=player.aggro;return !a||a.dead||a===mob}
@@ -1461,6 +1485,18 @@ const DEFAULT_GEAR_CONFIGS={
     hands:'Confliction gauntlets',
     feet:'Echo boots',
     ring:'Ring of suffering (i) (Recoil)'
+  }},
+  sang:{levels:{magic:99,def:99,hp:99},prayer:'augury',magicBoost:'saturatedHeart',defBoost:'brew',gear:{
+    head:'Justiciar faceguard',
+    cape:'Imbued zamorak cape (Normal)',
+    neck:'Occult necklace',
+    weapon:'Sanguinesti staff (Charged)',
+    body:'Torva platebody (Restored)',
+    shield:"Elidinis' ward (f)",
+    legs:'Oathplate legs',
+    hands:'Confliction gauntlets',
+    feet:'Echo boots',
+    ring:'Ring of suffering (i) (Recoil)'
   }}
 };
 const GEAR_PRAYERS={
@@ -1543,9 +1579,11 @@ function calculateMagicMaxHit(config,key,weapon,totals,prayer,currentMagic){
     baseMax=29;
   }else if(namedItem(weapon,'eye of ayak')){
     baseMax=Math.max(0,Math.floor(currentMagic/3)-6);
+  }else if(namedItem(weapon,'sanguinesti staff')){
+    baseMax=Math.max(6,Math.floor(currentMagic/3));
   }else{
     baseMax=LOADOUTS[key]?.maxHit||0;
-    warnings.push('Max hit uses the live preset because this mode expects Eye of ayak or Blood Barrage.');
+    warnings.push('Max hit uses the live preset because this mode expects Eye of ayak, Sanguinesti staff or Blood Barrage.');
   }
   let magicDamage=(totals.bonuses.magic_str||0)+(prayer.magicDmg||0);
   return {maxHit:Math.max(0,baseMax+Math.floor(baseMax*magicDamage/1000)),baseMax,magicDamage,warnings};
@@ -1595,6 +1633,7 @@ function deriveSpecialEffects(config,items){
   if(recoil.hasSuffering)effects.push('Ring of Suffering - Recoil');
   else if(recoil.hasRecoilRing)effects.push('Ring of Recoil - Recoil');
   if(hasBloodSceptre)effects.push('Blood Sceptre - 10% overheal, +10% healing');
+  if(weaponLabel.includes('sanguinesti staff'))effects.push('Sanguinesti Staff - 1/5 hits +8 damage, heal 50% of damage');
   return {...recoil,hasBloodSceptre,effects};
 }
 function calculateGearDraft(config,key=currentLoadoutKey){
@@ -2238,6 +2277,8 @@ function playerAttackStep(player,mobs,region,tick){
   let hit=Math.random()<acc;
   let dmg=0;
   if(hit){dmg=Math.floor(Math.random()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
+  // Sanguinesti passive: 1/5 successful hits deal +8 and heal half the damage dealt
+  if(hit&&loadout.isSang&&Math.random()<0.2){dmg+=8;player.hp=Math.min(player.maxHp,player.hp+Math.floor(dmg/2))}
   target.incomingProjectiles.push({delay,damage:dmg});
   // Blood barrage: heal 25% at cast time + 3x3 AOE
   if(loadout.isBloodBarrage){
