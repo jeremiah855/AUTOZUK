@@ -843,9 +843,8 @@ function hlTick(S){
     let hit=S.rng()<acc;
     let dmg=0;
     if(hit){dmg=Math.floor(S.rng()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
-    // Sanguinesti passive: 1/5 successful hits deal +8 and heal half the damage dealt
     let sangHeal=0;
-    if(hit&&loadout.isSang&&S.rng()<0.2){dmg+=8;sangHeal=Math.floor(dmg/2)}
+    if(hit&&loadout.isSang){let sang=rollSangPassive(S.rng,dmg,target);dmg=sang.dmg;sangHeal=sang.heal}
     target.incomingProjectiles.push({delay,damage:dmg});
     // Record player attack event for post HP calculation. Damage is rolled now,
     // but mob HP/death is applied when the projectile lands.
@@ -1136,6 +1135,16 @@ function optimizePrayer(allSimResults,spawnCode,pillarConfig,loadout){
 function loadoutHasRingRecoil(loadout){return !!loadout.hasRecoil&&loadout.hasRingRecoil!==false}
 function loadoutHasEchoBoots(loadout){return !!loadout.hasRecoil&&loadout.hasEchoBoots!==false}
 function loadoutHasBloodSceptre(loadout){return !!(loadout&&loadout.isBloodBarrage&&loadout.hasBloodSceptre)}
+// Healing loadouts are scored by the lowest HP reached, with death chance ranked first.
+function loadoutScoresByDeficit(loadout){return !!(loadout&&(loadout.isBloodBarrage||loadout.isSang))}
+// Sanguinesti passive: 1/5 successful hits deal +8 and heal half the damage dealt.
+// Damage dealt is capped at the target's HP left after projectiles already in flight.
+function rollSangPassive(rng,dmg,target){
+  if(rng()>=0.2)return{dmg,heal:0};
+  dmg+=8;
+  let hpLeft=target.hp;for(let p of target.incomingProjectiles)hpLeft-=p.damage;
+  return{dmg,heal:Math.floor(Math.max(0,Math.min(dmg,hpLeft))/2)};
+}
 function loadoutBloodHealRate(loadout){return loadoutHasBloodSceptre(loadout)?0.275:0.25}
 function loadoutBloodMaxHp(loadout){return loadoutHasBloodSceptre(loadout)?108:99}
 function loadoutStartingHp(loadout){let hp=Number(loadout?.startingHp??99);if(!Number.isFinite(hp))hp=99;return Math.max(1,Math.min(115,Math.round(hp)))}
@@ -1280,7 +1289,7 @@ function calcSimDamage(attacks,prayerSeq,loadout,mobInitHP){
         mobHP[r.mobId]-=r.damage;if(mobHP[r.mobId]<=0)scheduleMobRemoval(r.mobId,r.tick)}
     }
   }
-  return{damage:died?startHp:((loadout.isBloodBarrage||loadout.isSang)?Math.max(0,startHp-minHp):Math.max(0,startHp-hp)),died:died};
+  return{damage:died?startHp:(loadoutScoresByDeficit(loadout)?Math.max(0,startHp-minHp):Math.max(0,startHp-hp)),died:died};
 }
 // ===== Phase-1-shared helpers (also called from hl* in sim-core) =====
 function canSetLastAttacker(player,mob){let a=player.aggro;return !a||a.dead||a===mob}
@@ -1633,8 +1642,9 @@ function deriveSpecialEffects(config,items){
   if(recoil.hasSuffering)effects.push('Ring of Suffering - Recoil');
   else if(recoil.hasRecoilRing)effects.push('Ring of Recoil - Recoil');
   if(hasBloodSceptre)effects.push('Blood Sceptre - 10% overheal, +10% healing');
-  if(weaponLabel.includes('sanguinesti staff'))effects.push('Sanguinesti Staff - 1/5 hits +8 damage, heal 50% of damage');
-  return {...recoil,hasBloodSceptre,effects};
+  let hasSang=weaponLabel.includes('sanguinesti staff')||items.some(item=>namedItem(item,'sanguinesti staff'));
+  if(hasSang)effects.push('Sanguinesti Staff - 1/5 hits +8 damage, heal 50% of damage');
+  return {...recoil,hasBloodSceptre,hasSang,effects};
 }
 function calculateGearDraft(config,key=currentLoadoutKey){
   if(!wikiEquipment.length)throw new Error('Wiki equipment is still loading.');
@@ -1674,6 +1684,7 @@ function calculateGearDraft(config,key=currentLoadoutKey){
   let maxHit=calculateMagicMaxHit(config,key,weapon,totals,prayer,boostedMagic);
   warnings.push(...maxHit.warnings);
   let special=deriveSpecialEffects(config,items);
+  if(special.hasSang!==(key==='sang'))warnings.push('Attack speed and range come from the loadout; use the Sanguinesti loadout with the Sanguinesti staff.');
   return {key,config:cloneGearConfig(config),playerAcc,monsterAcc,recoil:special,special,maxHit:maxHit.maxHit,baseMaxHit:maxHit.baseMax,magicDamage:maxHit.magicDamage,warnings,hasConfliction,boosted:{magic:boostedMagic,def:boostedDef},weapon:wikiItemLabel(weapon),totals};
 }
 function populateGearStaticControls(){
@@ -1820,6 +1831,7 @@ function applyGearStats(){
   loadout.hasEchoBoots=!!draft.recoil.hasEchoBoots;
   loadout.hasRecoil=loadout.hasRingRecoil||loadout.hasEchoBoots;
   loadout.hasBloodSceptre=!!draft.special?.hasBloodSceptre;
+  loadout.isSang=!!draft.special?.hasSang;
   currentLoadout=loadout;
   gearDraftStats=draft;
   renderGearStatsPanel(draft);
@@ -2277,8 +2289,8 @@ function playerAttackStep(player,mobs,region,tick){
   let hit=Math.random()<acc;
   let dmg=0;
   if(hit){dmg=Math.floor(Math.random()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
-  // Sanguinesti passive: 1/5 successful hits deal +8 and heal half the damage dealt
-  if(hit&&loadout.isSang&&Math.random()<0.2){dmg+=8;player.hp=Math.min(player.maxHp,player.hp+Math.floor(dmg/2))}
+  let sangHeal=0;
+  if(hit&&loadout.isSang){let sang=rollSangPassive(Math.random,dmg,target);dmg=sang.dmg;sangHeal=sang.heal;player.hp=Math.min(player.maxHp,player.hp+sangHeal)}
   target.incomingProjectiles.push({delay,damage:dmg});
   // Blood barrage: heal 25% at cast time + 3x3 AOE
   if(loadout.isBloodBarrage){
@@ -2308,7 +2320,7 @@ function playerAttackStep(player,mobs,region,tick){
   player.attackDelay=loadout.atkSpeed;
   // Track barrage splash visual (Phase 1 rendering only)
   if(loadout.isBloodBarrage&&dmg>0){player.lastBarrageTarget={x:target.x,y:target.y,tick};}
-  tickEvents.push({tick,type:'player-atk',detail:`Player → ${target.type} #${target.id}, ${dmg}dmg hits T${tick+delay}`,mobId:target.id,isPlayerAttack:true});
+  tickEvents.push({tick,type:'player-atk',detail:`Player → ${target.type} #${target.id}, ${dmg}dmg hits T${tick+delay}${sangHeal>0?`, healed ${sangHeal}`:''}`,mobId:target.id,isPlayerAttack:true});
 }
 function spawnBlobletsFromBlob(blob,tick,simRef){
   let mobs=simRef.mobs;
@@ -2361,7 +2373,7 @@ function heatmapColor(avgDmg,alpha){
   return`rgba(${r},${g},${b},${a})`;
 }
 function autozukScoreValue(result,loadout=currentLoadout){
-  return loadout?.isBloodBarrage?(result.deathPct||0):result.avgDamage;
+  return loadoutScoresByDeficit(loadout)?(result.deathPct||0):result.avgDamage;
 }
 function autozukScoreText(result,loadout=currentLoadout){
   let value=autozukScoreValue(result,loadout);
@@ -2369,7 +2381,7 @@ function autozukScoreText(result,loadout=currentLoadout){
 }
 function isBetterAutozukResult(candidate,current,loadout=currentLoadout){
   if(!current)return true;
-  if(loadout?.isBloodBarrage){
+  if(loadoutScoresByDeficit(loadout)){
     if(!!candidate.markedDead!==!!current.markedDead)return !candidate.markedDead;
     if(candidate.deathPct!==current.deathPct)return candidate.deathPct<current.deathPct;
     if(candidate.avgDamage!==current.avgDamage)return candidate.avgDamage<current.avgDamage;
@@ -2389,7 +2401,7 @@ function bloodBarrageDeathHeatValue(deathPct){
   return 70+(deathPct-40)*0.5;                  // fade toward black/grey
 }
 function autozukHeatValue(result,loadout=currentLoadout){
-  return loadout?.isBloodBarrage?bloodBarrageDeathHeatValue(result.deathPct||0):result.avgDamage;
+  return loadoutScoresByDeficit(loadout)?bloodBarrageDeathHeatValue(result.deathPct||0):result.avgDamage;
 }
 function heatmapBlended(avgDmg,fx,fy,maxBlend){
   // Get raw heatmap RGB
@@ -3113,7 +3125,7 @@ async function startAutozuk(){
         let barW=Math.min(100,displayHeat);
         let row=document.createElement('div');row.className='feed-row';
         row.style.borderLeftColor=dmgColor;
-        let deathLabel=res.summary.markedDead?(loadout.isBloodBarrage?' \u2620':` \u2620${Math.round(res.summary.deathPct)}%`):'';
+        let deathLabel=res.summary.markedDead?(loadoutScoresByDeficit(loadout)?' \u2620':` \u2620${Math.round(res.summary.deathPct)}%`):'';
         row.innerHTML=`<span class="feed-tile">(${tile.x},${tile.y})</span><span class="feed-dmg" style="color:${dmgColor}">${dmgRound}${deathLabel}</span><div class="feed-bar"><div class="feed-bar-inner" style="width:${barW}%;background:${dmgColor}"></div></div><div class="feed-prayer">${prayHtml}</div><span class="feed-sims">${res.summary.totalSims}</span>`;
         let feedPanel=document.getElementById('liveFeedPanel');
         feedPanel.appendChild(row);
@@ -3146,7 +3158,7 @@ async function startAutozuk(){
     let[bx,by]=bestKey.split(',').map(Number);
     selectedTile={x:bx,y:by};playerPlacement={x:bx,y:by};activePrayerSeq=autozukResults[bestKey].prayer;
     showTileDetail(bx,by);
-    if(currentLoadout.isBloodBarrage){
+    if(loadoutScoresByDeficit(currentLoadout)){
       document.getElementById('autozukStatus').textContent=`Done! Best tile: (${bx},${by}) — ${bestResult.deathPct.toFixed(1)}% death, avg ${Math.round(bestResult.avgDamage)} max HP deficit`;
       setStatus(`Best tile: (${bx},${by}) with ${bestResult.deathPct.toFixed(1)}% death chance`,'info');
     }else{
@@ -3184,10 +3196,10 @@ function showTileDetail(x,y){
 
   let dmgClass=result.avgDamage<15?'good':result.avgDamage<30?'warn':'bad';
   let o50Class=result.over50Pct<10?'good':result.over50Pct<30?'warn':'bad';
-  let scoreLabel=currentLoadout.isBloodBarrage?'Avg Max HP Deficit':'Avg Damage';
-  let over50Label=currentLoadout.isBloodBarrage?'Runs > 50 deficit':'Runs > 50 dmg';
-  let scoreLabelClass=currentLoadout.isBloodBarrage?'':' score-active';
-  let deathLabelClass=currentLoadout.isBloodBarrage?' score-active':'';
+  let scoreLabel=loadoutScoresByDeficit(currentLoadout)?'Avg Max HP Deficit':'Avg Damage';
+  let over50Label=loadoutScoresByDeficit(currentLoadout)?'Runs > 50 deficit':'Runs > 50 dmg';
+  let scoreLabelClass=loadoutScoresByDeficit(currentLoadout)?'':' score-active';
+  let deathLabelClass=loadoutScoresByDeficit(currentLoadout)?' score-active':'';
   let deathRateRow=result.deathPct!==undefined?`<div class="detail-stat"><span class="label${deathLabelClass}">Death Rate</span><span class="value ${result.deathPct>30?'bad':result.deathPct>10?'warn':'good'}">${result.deathPct.toFixed(1)}%</span></div>`:'';
 
   dp.innerHTML=`
@@ -3237,8 +3249,8 @@ function updateLiveDetail(x,y,result){
   prayerHtml+='</div>';
   let dmgClass=result.avgDamage<15?'good':result.avgDamage<30?'warn':'bad';
   let o50Class=result.over50Pct<10?'good':result.over50Pct<30?'warn':'bad';
-  let scoreLabel=currentLoadout.isBloodBarrage?'Avg Max HP Deficit':'Avg Damage';
-  let over50Label=currentLoadout.isBloodBarrage?'Runs > 50 deficit':'Runs > 50 dmg';
+  let scoreLabel=loadoutScoresByDeficit(currentLoadout)?'Avg Max HP Deficit':'Avg Damage';
+  let over50Label=loadoutScoresByDeficit(currentLoadout)?'Runs > 50 deficit':'Runs > 50 dmg';
   dp.innerHTML=`
     <h3 style="font-family:'JetBrains Mono',monospace;color:var(--accent);font-size:13px;font-weight:800;margin-bottom:6px;letter-spacing:1px">Tile (${x}, ${y})</h3>
     <div class="detail-stat"><span class="label">${scoreLabel}</span><span class="value ${dmgClass}">${result.avgDamage.toFixed(1)}</span></div>
